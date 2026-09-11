@@ -161,7 +161,7 @@ export function formatSessionTokens(
 
 /** Format turn count with optional max limit: "↻5≤30" or "↻5". */
 export function formatTurns(turnCount: number, maxTurns?: number | null): string {
-  return maxTurns != null ? `↻${turnCount}≤${maxTurns}` : `↻${turnCount}`;
+  return maxTurns != null ? `↻ ${turnCount}≤${maxTurns}` : `↻ ${turnCount}`;
 }
 
 /** Format milliseconds as human-readable duration. */
