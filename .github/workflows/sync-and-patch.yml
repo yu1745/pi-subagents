@@ -1,0 +1,71 @@
+name: Sync Upstream & Apply Patches
+
+on:
+  schedule:
+    # Runs every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add and Fetch Upstream
+        run: |
+          git remote add upstream https://github.com/tintinweb/pi-subagents.git || true
+          git fetch upstream master
+
+      - name: Merge Upstream
+        run: |
+          # Save workflow file
+          cp .github/workflows/sync-and-patch.yml /tmp/sync-and-patch.yml
+          git reset --hard upstream/master
+          mkdir -p .github/workflows
+          cp /tmp/sync-and-patch.yml .github/workflows/sync-and-patch.yml
+
+      - name: Apply Custom Patches
+        run: |
+          # Fix ↻ glyph collision with following digits in monospace terminals
+          node -e '
+            const fs = require("fs");
+            const file = "src/ui/agent-widget.ts";
+            let content = fs.readFileSync(file, "utf8");
+            content = content.replace(
+              /`↻\$\{turnCount\}(?:≤\$\{maxTurns\})?` : `↻\$\{turnCount\}`/,
+              "`↻ ${turnCount}≤${maxTurns}` : `↻ ${turnCount}`"
+            );
+            fs.writeFileSync(file, content, "utf8");
+          '
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify Build
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
+
+      - name: Commit and Push Changes
+        run: |
+          git add -A
+          if git diff-index --quiet HEAD --; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: sync upstream and apply turn glyph spacing patch"
+            git push origin master --force
+          fi
