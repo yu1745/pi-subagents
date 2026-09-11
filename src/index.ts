@@ -12,6 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -36,6 +37,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { collectSubagentActivity, DEFAULT_ACTIVITY_DETAIL_LIMIT, DEFAULT_ACTIVITY_LIMIT, DEFAULT_WATCH_INTERVAL_SECONDS, formatActivityDetailPage, formatActivityPage, getSubagentActivityDetail, MAX_ACTIVITY_DETAIL_CHARS, MAX_ACTIVITY_DETAIL_LIMIT, MAX_ACTIVITY_LIMIT, MAX_WATCH_INTERVAL_SECONDS, MIN_WATCH_INTERVAL_SECONDS, SupervisionScheduler } from "./subagent-supervision.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -735,6 +737,13 @@ export default function (pi: ExtensionAPI) {
     return resolved?.kind === "live" ? resolved.record : undefined;
   };
 
+  // Agent IDs can be reused by a resumed record, while an AgentSession has its
+  // own stable host identity. Bind supervision cursors and activity IDs to both
+  // so an ID from another session cannot resolve against a replacement transcript.
+  const activitySourceFor = (record: AgentRecord) => record.session
+    ? { identity: `${record.id}:${record.session.sessionId}`, messages: record.session.messages }
+    : undefined;
+
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
@@ -759,6 +768,25 @@ export default function (pi: ExtensionAPI) {
   // (currentCtx would stay undefined → spawn always "No active session"). Gating
   // here makes a filtered session behave like an absent one (#142).
   let rpcHandle: RpcHandle | undefined;
+  // Watches are session-scoped and inert until watch_subagent starts one. Their
+  // notification is a custom message, never a spoofed user prompt.
+  const supervision = new SupervisionScheduler({
+    getTarget: agentId => {
+      const record = manager.getRecord(agentId);
+      if (!record) return undefined;
+      const { session, ...target } = record;
+      return session ? { ...target, session: activitySourceFor(record)! } : target;
+    },
+    isParentBusy: () => currentCtx ? !currentCtx.isIdle() : true,
+    hasPendingParentMessages: () => currentCtx?.hasPendingMessages() ?? true,
+    send: content => {
+      pi.sendMessage({
+        customType: "subagent-supervision",
+        content,
+        display: true,
+      }, { deliverAs: "followUp", triggerTurn: true });
+    },
+  });
   /** Whether the `@handle` autocomplete wrapper has been stacked on pi's provider. */
   let mentionProviderRegistered = false;
 
@@ -1090,6 +1118,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_before_switch", () => {
     manager.clearCompleted(true);
     scheduler.stop();
+    supervision.dispose();
   });
 
   // On shutdown, abort all agents immediately and clean up.
@@ -1107,6 +1136,7 @@ export default function (pi: ExtensionAPI) {
       delete (globalThis as any)[MANAGER_KEY];
     }
     scheduler.stop();
+    supervision.dispose();
     // Before abortAll, and not folded into it: a workflow owns a worker thread
     // as well as its children, and only its own signal terminates that.
     for (const task of workflowTasks.values()) task.abortController.abort();
@@ -1480,9 +1510,9 @@ Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
 - Parallel work: one message, multiple Agent calls — they run concurrently.
-- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
+- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Do not poll by default; use get_subagent_activity or watch_subagent only for explicit opt-in parent supervision. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
+- resume by ID; steer_subagent handles user steers or supervision corrections. Correct direction, scope, or acceptance; child self-heals mistakes.${isolationCompactGuideline}`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -1503,11 +1533,11 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently. If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.
 - When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
-- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
+- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead. The exception is explicit opt-in parent supervision: use get_subagent_activity for bounded evidence or watch_subagent for periodic evidence only when that oversight is requested or necessary.
 - **Foreground vs background**: Pass \`run_in_background: false\` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result "next" is not enough on its own.
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent to send mid-run messages to a running background agent.
+- Use steer_subagent for a direct user-requested steer, or when supervision evidence shows direction, scope, or acceptance drift. Leave recoverable edit-match, build, type, or test failures to the child while it adapts and self-heals; state the evidence and desired boundary rather than micromanaging steps.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
@@ -1586,7 +1616,8 @@ Terse command-style prompts produce shallow, generic work.
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
       "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
-      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
+      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it by default. Use get_subagent_activity or watch_subagent only for explicit opt-in parent supervision.",
+      "Parent supervision corrects direction, scope, or acceptance—not recoverable detail mistakes. Leave edit-match, build, type, or test failures to the child when it is adapting; steer on evidence of drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. Silence or one error is not enough; state evidence and the desired boundary, not micromanaged steps.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
     parameters: Type.Object({
@@ -2816,15 +2847,191 @@ Terse command-style prompts produce shallow, generic work.
     },
   }));
 
+  // ---- get_subagent_activity tool ----
+
+  registerToolReportingUsage(defineTool({
+    name: "get_subagent_activity",
+    label: "Get Agent Activity",
+    description:
+      "Read bounded recent or incremental public activity from a top-level subagent without consuming its result. " +
+      "Returns text, tool-call argument excerpts, and tool-result excerpts; thinking and image/base64 data are excluded.",
+    promptSnippet: "Read bounded incremental activity from a subagent",
+    promptGuidelines: [
+      "Use get_subagent_activity only for explicit parent supervision. Treat excerpts as an observation opportunity, not a mandate to steer; compare them with the child’s original scope, objective, and acceptance criteria.",
+      "The child self-heals recoverable detail mistakes while adapting. Silence or one edit-match, build, type, or test error is not enough; steer for direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary, not micromanaged steps.",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "The top-level agent ID or handle to inspect.",
+      }),
+      limit: Type.Optional(Type.Integer({
+        minimum: 1,
+        maximum: MAX_ACTIVITY_LIMIT,
+        description: `Maximum public activity events to return (default ${DEFAULT_ACTIVITY_LIMIT}, maximum ${MAX_ACTIVITY_LIMIT}).`,
+      })),
+      cursor: Type.Optional(Type.String({
+        maxLength: 2048,
+        description: "Opaque cursor from a previous get_subagent_activity response. Omit for the current retained transcript.",
+      })),
+    }),
+    execute: async (_toolCallId, params) => {
+      const record = resolveAgentRef(params.agent_id);
+      if (!record || !isTopLevelAgent(record)) {
+        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      }
+      const page = collectSubagentActivity(
+        activitySourceFor(record),
+        params.limit ?? DEFAULT_ACTIVITY_LIMIT,
+        params.cursor,
+      );
+      const header = [
+        `Agent: ${record.id}`,
+        `Status: ${record.status}`,
+        record.outputFile ? `Output file: ${record.outputFile}` : undefined,
+      ].filter((value): value is string => value !== undefined).join(" | ");
+      return textResult(`${header}\n\n${formatActivityPage(page)}`);
+    },
+  }));
+
+  // ---- get_subagent_activity_detail tool ----
+
+  registerToolReportingUsage(defineTool({
+    name: "get_subagent_activity_detail",
+    label: "Get Agent Activity Detail",
+    description:
+      "Read one paginated public transcript message selected by an activity ID, without consuming a result or changing activity/watch cursors. " +
+      "Tool arguments, tool results, and public error metadata are included; thinking, images, and base64 are excluded.",
+    promptSnippet: "Read one bounded subagent activity detail",
+    promptGuidelines: [
+      "Use get_subagent_activity_detail only after get_subagent_activity returned an activity ID and only for explicit parent supervision. It reads one bounded public message; it does not consume the child result or move a watch.",
+      "Treat detail as an observation opportunity, not a mandate to steer. The parent corrects direction, scope, or acceptance; the child self-heals recoverable detail mistakes. Silence or one error is not enough; steer on evidence such as drift, repeated ineffective attempts without new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action, and state the desired boundary.",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "The top-level agent ID or handle that produced the activity ID.",
+      }),
+      activity_id: Type.String({
+        maxLength: 512,
+        description: "Opaque activity ID returned by get_subagent_activity for this same agent session.",
+      }),
+      offset: Type.Optional(Type.Integer({
+        minimum: 0,
+        maximum: MAX_ACTIVITY_DETAIL_CHARS,
+        description: `Character offset in this message's bounded public rendering (default 0; maximum ${MAX_ACTIVITY_DETAIL_CHARS}).`,
+      })),
+      limit: Type.Optional(Type.Integer({
+        minimum: 1,
+        maximum: MAX_ACTIVITY_DETAIL_LIMIT,
+        description: `Characters to return (default ${DEFAULT_ACTIVITY_DETAIL_LIMIT}; maximum ${MAX_ACTIVITY_DETAIL_LIMIT}).`,
+      })),
+    }),
+    execute: async (_toolCallId, params) => {
+      const record = resolveAgentRef(params.agent_id);
+      if (!record || !isTopLevelAgent(record)) {
+        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      }
+      const page = getSubagentActivityDetail(
+        activitySourceFor(record),
+        params.activity_id,
+        params.offset ?? 0,
+        params.limit ?? DEFAULT_ACTIVITY_DETAIL_LIMIT,
+      );
+      const header = [
+        `Agent: ${record.id}`,
+        `Status: ${record.status}`,
+        `Activity ID: ${params.activity_id}`,
+      ].join(" | ");
+      return textResult(`${header}\n\n${formatActivityDetailPage(page)}`);
+    },
+  }));
+
+  // ---- watch_subagent tool ----
+
+  registerToolReportingUsage(defineTool({
+    name: "watch_subagent",
+    label: "Watch Agent",
+    description:
+      "Opt in to, stop, or inspect session-scoped periodic parent supervision for one top-level background agent. " +
+      "A watch sends bounded combined activity evidence only while the parent is idle; it never declares a silent child stuck.",
+    promptSnippet: "Opt in to periodic bounded subagent supervision",
+    promptGuidelines: [
+      "Use watch_subagent only for explicit opt-in parent supervision of a top-level background agent. A notification is an observation opportunity, not a mandate to steer: compare untrusted evidence with the child’s original scope, objective, and acceptance criteria.",
+      "Let the child self-heal recoverable edit-match, build, type, or test mistakes while adapting. Silence or one error is not enough; intervene for direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary rather than micromanaging steps.",
+    ],
+    parameters: Type.Object({
+      // pi-ai's StringEnum is required for Google-compatible enum schemas;
+      // this extension still builds its surrounding Type.Object with the host's
+      // legacy @sinclair TypeBox package, so bridge the structurally identical
+      // schema across that compile-time package boundary.
+      action: StringEnum(["start", "stop", "status"] as const, {
+        description: "start a watch, stop one, or return its current status.",
+      }) as unknown as ReturnType<typeof Type.String>,
+      agent_id: Type.String({
+        description: "The top-level background agent ID or handle to watch.",
+      }),
+      interval_seconds: Type.Optional(Type.Integer({
+        minimum: MIN_WATCH_INTERVAL_SECONDS,
+        maximum: MAX_WATCH_INTERVAL_SECONDS,
+        description: `Periodic interval in seconds (default ${DEFAULT_WATCH_INTERVAL_SECONDS}; ${MIN_WATCH_INTERVAL_SECONDS}-${MAX_WATCH_INTERVAL_SECONDS}).`,
+      })),
+      review_brief: Type.Optional(Type.String({
+        maxLength: 500,
+        description: "Optional bounded review focus included with evidence notifications.",
+      })),
+      criteria: Type.Optional(Type.String({
+        maxLength: 500,
+        description: "Optional bounded correction criteria included with evidence notifications.",
+      })),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      if (ctx.mode === "print" || ctx.mode === "json") {
+        return textResult("watch_subagent is unavailable in print or JSON mode because that invocation does not stay alive for periodic supervision.");
+      }
+      const record = resolveAgentRef(params.agent_id);
+      if (!record || !isTopLevelAgent(record)) {
+        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      }
+      if (params.action === "status") {
+        const watch = supervision.status(record.id)[0];
+        return textResult(watch
+          ? `Watch for ${record.id}: ${watch.state}${watch.stoppedReason ? ` (${watch.stoppedReason})` : ""}. ` +
+            `Interval: ${watch.intervalSeconds}s.${watch.lastError ? ` Last error: ${watch.lastError}` : ""}`
+          : `No watch is configured for agent ${record.id}.`);
+      }
+      if (params.action === "stop") {
+        const watch = supervision.stop(record.id);
+        return textResult(watch
+          ? `Stopped supervision watch for agent ${record.id}.`
+          : `No active supervision watch exists for agent ${record.id}.`);
+      }
+      const started = supervision.start({
+        agentId: record.id,
+        intervalSeconds: params.interval_seconds,
+        reviewBrief: params.review_brief,
+        criteria: params.criteria,
+      });
+      if (!started.ok) return textResult(started.error);
+      return textResult(
+        `${started.updated ? "Updated" : "Started"} supervision watch for agent ${record.id} every ${started.watch.intervalSeconds}s. ` +
+        "It sends bounded activity evidence only while the parent is idle and stops automatically when the agent becomes terminal.",
+      );
+    },
+  }));
+
   // ---- steer_subagent tool ----
 
   registerToolReportingUsage(defineTool({
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
-      "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents.",
+      "Send a steering message to a running agent. Use this for a direct user-requested steer or an evidence-based supervision correction; " +
+      "the parent corrects direction, scope, or acceptance while the child self-heals recoverable detail mistakes. State evidence and the desired boundary, not micromanaged steps. " +
+      "The message interrupts the agent after its current tool execution and is injected into its conversation. Only works on running agents.",
     promptSnippet: "Send a steering message to redirect a running background agent",
+    promptGuidelines: [
+      "Direct user-requested steering is normal. For supervision corrections, steer only on evidence of direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action; silence or one recoverable error is not enough.",
+      "Leave recoverable edit-match, build, type, and test failures to the child when it is adapting and self-healing. State the evidence and desired boundary, not a micromanaged sequence of steps.",
+    ],
     parameters: Type.Object({
       agent_id: Type.String({
         description: "The agent ID to steer (must be currently running). The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",

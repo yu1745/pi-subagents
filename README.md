@@ -22,6 +22,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Agent mentions** — subagents are first-class: type `@explore also check the RPC path` at the prompt and it goes to that agent instead of the main model, without a word of it entering the chat. One syntax covers the whole lifecycle — message it while it runs, resume it once it has finished, reopen its session from disk long after that, or start it if it never ran. Mentioning an agent that isn't running spawns it through an off-screen clone of the conversation, so it gets Claude Code's context-written prompt and a real `Agent` tool call without a word of it reaching the chat; `direct` mode starts it here from your text instead, with no model call at all. The orchestrator can `name` an agent so you address it as `@auth-audit`, and handles work in `steer_subagent`/`get_subagent_result` too. `@` completes live agents, resumable ones, and startable types alongside pi's file completion; `@main` forces text back to the main model. Toggle via `/agents → Settings → Agent mentions`
 - **Scripted workflows** — a `SubagentWorkflow` tool that runs a deterministic JavaScript script orchestrating many subagents: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()` and `args`, with a pure-literal `meta` block declaring the phases. `pipeline()` has no barrier between stages, so one item can be in a later stage while another is still in the first — unlike `parallel()`, which idles every fast agent until the slowest finishes. Runs in the background with a live card, inspectable via `/agents → Workflows` or by selecting the run in FleetView. `agent()` also takes `gate: "npm test"` to verify a child by running a command (inside its worktree, when isolated) rather than asking another model, and `resume: "<label>"` to continue a child instead of re-paying its context. Scripts run in a `node:vm` sandbox on a worker thread where `Date.now()`, `Math.random()` and `eval` throw. On by default, but it stands down for company: if another extension already provides a `Workflow` or `SubagentWorkflow` tool, this one warns and disables itself for the session rather than offering the model two orchestrators. Pin it either way with `"workflowsEnabled"` in `subagents.json` or `/agents → Settings → Workflows`. A script written for Claude Code's `Workflow` tool runs here unchanged: same globals, `schema` returns a validated object exactly as it does there, `budget` is present and always reports no token target (pi has no such directive) so its `budget.total`-guarded patterns still take the branch they were written for, and nested `workflow()` composes saved workflows one level deep. **[Full guide](https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md)**
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
+- **Opt-in parent supervision** — read a bounded recent child-activity snapshot followed by cursor-based increments, drill into one stable activity ID when an excerpt is insufficient, or request periodic evidence wake-ups; excerpts exclude thinking, images, and base64, and silence is never treated as failure
 - **Session resume** — pick up where an agent left off, preserving full conversation context. Resumes detached by default and notifies you on completion, just like a fresh spawn; pass `run_in_background: false` to block and get the result inline
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
 - **Case-insensitive agent types** — `"explore"`, `"Explore"`, `"EXPLORE"` all work. A type that doesn't resolve to exactly one *enabled* agent — unknown, disabled, or ambiguous between two agents differing only by case — falls back to general-purpose with a note, or is refused outright under [`fallbackSubagent: none`](#persistent-settings)
@@ -457,6 +458,49 @@ Concurrency is capped at `max(1, min(16, cpus - 2))` — the run's own limit, in
 
 **Full guide:** [`docs/workflows.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md) — how the model writes the script for you, how to edit and re-run it, how to save one as a reusable named workflow, plus the complete `agent()` option reference, recipes and troubleshooting.
 
+### `get_subagent_activity`
+
+Read bounded public activity from a top-level agent without consuming its result. With no cursor, the response is a **recent** retained snapshot and explicitly marks any earlier retained activity it omitted; a returned cursor then advances chronologically. Every returned event has a stable opaque **activity ID** for [`get_subagent_activity_detail`](#get_subagent_activity_detail). The response includes bounded text, tool-call argument excerpts, tool-result excerpts (including `isError`), timestamps, and assistant stop/error metadata. Thinking, images, and base64 payloads are excluded. Cursors are bound to that agent session; a different session, compaction, resume replacement, or invalid cursor produces an explicit reset gap rather than silently skipping activity. Total output, individual blocks, tool calls, names, arguments, and cursor size are bounded.
+
+The collector scans at most 400 transcript messages and 64 content blocks per message. It prioritizes public text and tool calls within that bounded block scan, so leading thinking/image blocks cannot consume the old eight-block public window; if a public block lies beyond the 64-block scan, the event explicitly says `truncated: content blocks` rather than presenting the private-only prefix as complete. A summary page is at most 9,000 characters; an event has at most two text blocks / 180 text characters, two tool calls, 48-character tool names, and 240-character argument excerpts.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | Agent ID or handle |
+| `limit` | number | no | Events to return (default 8, maximum 20) |
+| `cursor` | string | no | Opaque cursor from the prior response |
+
+This is independent from `get_subagent_result`: it does not mark a result consumed or alter completion notifications.
+
+### `get_subagent_activity_detail`
+
+Read the bounded public rendering of **exactly one** message selected by an activity ID. Use it only when the summary excerpt is insufficient; it does not read arbitrary files, retrieve a final result, consume a result, or move an activity/watch cursor.
+
+```text
+get_subagent_activity({ agent_id: "agent-abc" })
+# assistant [activity id: eyJ2ZXJzaW9uIjox...]: editing the scheduler
+
+get_subagent_activity_detail({
+  agent_id: "agent-abc",
+  activity_id: "eyJ2ZXJzaW9uIjox...",
+  offset: 0,
+  limit: 4096,
+})
+# public text, tool arguments/results, and error metadata
+# next_offset: 4096
+# has_more: true
+# truncated: false
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_id` | string | yes | Top-level agent ID or handle that produced the activity ID |
+| `activity_id` | string | yes | Opaque ID returned by `get_subagent_activity` for this same live agent session |
+| `offset` | number | no | Character offset in the detail rendering (default 0; maximum 65,536) |
+| `limit` | number | no | Characters to return (default 4,096; maximum 8,192) |
+
+Responses report `next_offset`, `has_more`, and `truncated` explicitly. Detail pagination can reconstruct up to 65,536 characters of one public rendering; rendering scans at most 64 content blocks, includes at most 16 tool calls, and bounds one serialized tool argument to 12,000 characters. Thinking, images, and base64 remain excluded. An activity ID is bound to the agent **and live session**, then validated against the exact retained transcript-message object; an invalid ID, another session, compaction, or replacement returns explicit `Activity unavailable` rather than returning a different message. IDs are session-local and are not durable resume handles.
+
 ### `get_subagent_result`
 
 Check status and retrieve results from a background agent.
@@ -471,12 +515,28 @@ Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. Th
 
 ### `steer_subagent`
 
-Send a steering message to a running agent. The message interrupts after the current tool execution.
+Send a steering message to a running agent. Direct user-requested steering is normal. For supervision corrections, use evidence to correct direction, scope, or acceptance; leave recoverable detail mistakes to the child to self-heal, and state the evidence and desired boundary rather than micromanaging steps. The message interrupts after the current tool execution.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to steer |
 | `message` | string | yes | Message to inject into agent conversation |
+
+### `watch_subagent`
+
+Start, stop, or inspect opt-in periodic parent supervision for one top-level background agent. A watch is session-scoped and nonpersistent; it starts no timer until requested, coalesces a fair rotating subset of due watches into one bounded custom-message notification, defers while the parent is busy or has pending messages, and stops when the agent becomes terminal or the session shuts down. Cursors advance only after their fully included evidence notification sends successfully; deferred or failed sends retain evidence for retry. It is rejected in print and JSON modes because those invocations do not remain alive.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `action` | `"start"` \| `"stop"` \| `"status"` | yes | Watch operation |
+| `agent_id` | string | yes | Top-level background agent ID or handle |
+| `interval_seconds` | number | no | Default 240; minimum 30 and maximum 3600 |
+| `review_brief` | string | no | Bounded review focus |
+| `criteria` | string | no | Bounded correction criteria |
+
+Watch evidence is untrusted and is an observation opportunity, not a mandate to steer. Compare it with the child's original scope, objective, and acceptance criteria: the parent corrects direction, scope, or acceptance, while the child self-heals recoverable edit-match, build, type, and test mistakes. Silence or one error is not enough; intervene for drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary rather than micromanaging steps. Every selected periodic watch wakes the parent even when there is no new retained public activity, carrying its last delivered progress evidence (or an explicit absence); that is not evidence that an agent is stuck or drifting. If a watch's incremental page has fallen behind, it sends a bounded **latest** retained snapshot instead of replaying stale history. That notification explicitly says it skipped intervening retained activity and includes the prior, valid catch-up cursor in angle brackets; use that cursor with a manual `get_subagent_activity` call to inspect the skipped range. This freshness rule is only for watches — normal manual incremental reads retain their chronological cursor semantics. A watch commits its snapshot cursor only after successfully sending the fully bounded notification; send failure retains the prior cursor for retry. Reading `get_subagent_activity_detail` never changes that cursor. Watch evidence is capped at 2,100 characters per agent section and 2,600 characters including its header. Normal background work remains notification-driven: do not poll by default; use these tools only for explicit supervision.
+
+**v1 limitation:** activity and watches are top-level-only. Nested children and workflow-owned agents remain owned by their parent/workflow and do not expose these tools.
 
 ## Commands
 
@@ -954,6 +1014,7 @@ src/
   abortable.ts        # Race a wait against Esc without cancelling the background child
   group-join.ts       # Group join manager: batched completion notifications with timeout
   status-note.ts      # Honest status note + salvaged partial output for non-normal outcomes
+  subagent-supervision.ts # Bounded activity cursors and opt-in parent watch scheduler
   usage.ts            # Token usage shapes, accumulators, session-stats readers
 
   # Invocation surface

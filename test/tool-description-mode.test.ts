@@ -130,6 +130,8 @@ describe("toolDescriptionMode", () => {
       "run_in_background",
       "resume",
       "steer_subagent",
+      "direction, scope, or acceptance",
+      "self-heals",
       'isolation: "worktree"',
       ".pi/agents/",
       "self-contained",
@@ -153,6 +155,8 @@ describe("toolDescriptionMode", () => {
       "run_in_background",
       "resume",
       "steer_subagent",
+      "direction, scope, or acceptance",
+      "self-heals",
       "worktree",
       ".pi/agents/",
       "self-contained",
@@ -333,7 +337,7 @@ describe("toolDescriptionMode", () => {
       const tools = setup({ toolDescriptionMode: "compact", worktreeIsolation: false });
       expect(tools.get("Agent").description).not.toContain("isolation");
       // The bullet above it survives — the gate trims a suffix, not the list.
-      expect(tools.get("Agent").description).toContain("resume continues a previous agent by ID");
+      expect(tools.get("Agent").description).toContain("resume by ID");
     });
   });
 
