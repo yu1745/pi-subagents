@@ -144,6 +144,12 @@ The slot is claimed by the first activation only; subagent sessions re-activate 
 
 Prefer the bus. The registry has no reply envelope, no version, and no availability event — `globalThis[Symbol.for("pi-subagents:manager")] === undefined` is the only probe you get, and it is also `undefined` in a session that filtered pi-subagents out. Reach for it for the two things the bus has no verb for — *is anything still running*, and *give me a settled record back* — or for a headless host that wants to block on `waitForAll()` before exiting.
 
+## Context-management identity
+
+Before binding child extensions, the runner appends `context-management-agent-identity` metadata with `{ version: 1, sessionId, rootSessionId, agentName }`. `sessionId` binds it to the actual child session; nested children inherit the root task ID and extend the parent's `/root/<stable-agent-id>` namespace. Valid resumed identities are preserved; copied fork metadata with a different session ID is ignored. No task membership is inferred from `parentSession` or display names.
+
+This optional host metadata lets local history/notes extensions share state within a task without scanning unrelated project sessions. It works with persistent and in-memory SessionManagers; it does not itself persist in-memory conversation history, change scheduling, or alter remote model requests.
+
 ## Protocol versions
 
 `subagents:rpc:ping` replies `{ version: PROTOCOL_VERSION }`, currently `2` (`src/cross-extension-rpc.ts:33`). The constant was introduced already equal to `2` in 0.5.0; "v1" is a retroactive name for the pre-envelope contract, where spawn replied with a bare `{ id }` or `{ error }`, stop replied `{ success: boolean }` with no message, and each handler caught its own errors.

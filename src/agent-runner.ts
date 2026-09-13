@@ -20,6 +20,7 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
+import { appendContextManagementAgentIdentity } from "./context-management-identity.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
@@ -974,6 +975,10 @@ export async function runAgent(
           parentSession: ctx.sessionManager?.getSessionFile?.(),
         })
       : SessionManager.inMemory(effectiveCwd);
+
+  // Child sessions are separate SDK SessionManagers, so persist the root-session
+  // and stable-agent namespace context-management needs before creating the session.
+  appendContextManagementAgentIdentity(ctx.sessionManager, sessionManager, options.agentId);
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.
