@@ -134,6 +134,18 @@ export type AgentMentionMode = 'model' | 'direct' | 'off';
  * is discarded after ~10 minutes, but the pi session it wrote is still on disk,
  * and this is the little that is needed to find and describe it again.
  */
+export interface AgentResumeState {
+  sessionId: string;
+  /** Actual execution directory and trusted configuration root, never guessed on restore. */
+  cwd: string;
+  configCwd: string;
+  isolated: boolean;
+  maxTurns?: number;
+  thinkingLevel?: EffectiveThinkingLevel;
+  worktreeBase?: string;
+  invocation?: AgentInvocation;
+}
+
 export interface AgentTombstone {
   handle: string;
   alias?: string;
@@ -143,6 +155,8 @@ export interface AgentTombstone {
   /** Always set — a record with no session file is never tombstoned. */
   sessionFile: string;
   completedAt: number;
+  resumeState?: AgentResumeState;
+  status?: AgentRecord["status"];
 }
 
 /**
@@ -217,6 +231,7 @@ export interface AgentRecord {
    * in-memory session, which leaves nothing to reopen.
    */
   sessionFile?: string;
+  resumeState?: AgentResumeState;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
   /**

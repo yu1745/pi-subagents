@@ -61,6 +61,7 @@ function fakeSession(overrides: Record<string, unknown> = {}) {
     subscribe: vi.fn(() => () => {}),
     messages: [],
     getActiveToolNames: vi.fn(() => []),
+    sessionManager: { getSessionId: vi.fn(() => "mention-session") },
     ...overrides,
   } as any;
 }
@@ -1015,7 +1016,19 @@ describe("resuming an evicted agent by name", () => {
     const manager = (globalThis as any)[Symbol.for("pi-subagents:manager")];
     const record = manager.getRecord(id);
     record.sessionFile = sessionPath();
-    writeFileSync(record.sessionFile, "");
+    record.resumeState = {
+      sessionId: record.session.sessionManager.getSessionId(),
+      cwd: process.cwd(),
+      configCwd: process.cwd(),
+      isolated: false,
+    };
+    writeFileSync(record.sessionFile, `${JSON.stringify({
+      type: "session",
+      version: 3,
+      id: record.resumeState.sessionId,
+      cwd: process.cwd(),
+      timestamp: new Date().toISOString(),
+    })}\n`);
     record.completedAt = Date.now() - 11 * 60_000;
     await vi.advanceTimersByTimeAsync(60_000);
     return manager;
@@ -1045,8 +1058,9 @@ describe("resuming an evicted agent by name", () => {
       expect.anything(),
       "Explore",
       "anything else?",
-      expect.objectContaining({ resumeSessionFile: sessionPath() }),
+      expect.objectContaining({ agentId: id, resumeSessionFile: sessionPath(), resumeSessionId: "mention-session" }),
     );
+    expect(manager.getRecord(id)).toMatchObject({ id, handle: "explore" });
     expect(uiCtx.ui.notify).toHaveBeenCalledWith("Resuming @explore", "info");
   });
 
@@ -1146,7 +1160,7 @@ describe("resuming an evicted agent by name", () => {
 
     expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
     expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      "Could not resume @scout — the scout agent is no longer available.", "warning",
+      "Could not resume @scout: Could not resume — the scout agent is no longer available.", "warning",
     );
   });
 
@@ -1230,8 +1244,7 @@ describe("resuming an evicted agent by name", () => {
     await send(lifecycle, "@explore anything else?");
     await flush();
 
-    // runAgent receives the new record's id, which is the only handle a test
-    // has on an agent the dispatcher spawned without returning anything.
+    // The cold resume keeps the original identity and description.
     const resumedId = (vi.mocked(runAgent).mock.calls[0][3] as any).agentId;
     const manager = (globalThis as any)[Symbol.for("pi-subagents:manager")];
     expect(manager.getRecord(resumedId).description).toBe("find flaky tests");
@@ -1277,18 +1290,19 @@ describe("resuming an evicted agent by name", () => {
     expect(result).toEqual({ action: "handled" });
     expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
     expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      "Could not resume @explore — its session is gone.", "warning",
+      expect.stringContaining(`Could not resume @explore: Cannot resume session "${sessionPath()}": ENOENT`), "warning",
     );
   });
 
-  it("forgets an unopenable session so the next mention starts fresh", async () => {
-    // A row that can only ever fail is worse than no row: it holds the handle
-    // and refuses every message sent to it.
+  it.each(["missing", "corrupt"])("retains a %s session's handle rather than starting fresh", async (failure) => {
+    // Failed validation must not silently replace the saved conversation.
     const { lifecycle, tools } = bootDirect();
     finishedRun(fakeSession());
-    await evict(await spawnBackground(tools));
+    const id = await spawnBackground(tools);
+    const manager = await evict(id);
     await flush();
-    unlinkSync(sessionPath());
+    if (failure === "missing") unlinkSync(sessionPath());
+    else writeFileSync(sessionPath(), "{}\n");
     await send(lifecycle, "@explore anything else?");
     vi.mocked(runAgent).mockClear();
     heldRun(fakeSession());
@@ -1300,11 +1314,22 @@ describe("resuming an evicted agent by name", () => {
     );
     await flush();
 
-    expect(vi.mocked(runAgent)).toHaveBeenCalledWith(
-      expect.anything(), "Explore", "start over",
-      expect.not.objectContaining({ resumeSessionFile: expect.anything() }),
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    expect(manager.getRecord(id)).toBeUndefined();
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining(`Could not resume @explore: Cannot resume session "${sessionPath()}"`), "warning",
     );
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Started @explore", "info");
+
+    writeFileSync(sessionPath(), `${JSON.stringify({
+      type: "session", version: 3, id: "mention-session", cwd: process.cwd(), timestamp: new Date().toISOString(),
+    })}\n`);
+    await send(lifecycle, "@explore retry after repair");
+    await flush();
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.anything(), "Explore", "retry after repair",
+      expect.objectContaining({ agentId: id, resumeSessionFile: sessionPath() }),
+    );
+    expect(manager.getRecord(id)).toMatchObject({ id, handle: "explore" });
   });
 });
 

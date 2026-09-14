@@ -347,6 +347,7 @@ describe("AgentManager — nested runtime propagation", () => {
   });
 
   it("gives a workflow's child no handle, so nothing can address it", () => {
+    manager = new AgentManager();
     // Same reasoning as a nested child: it is filtered out of every top-level
     // surface, so a handle would name something unreachable and consume a name
     // a visible agent could have taken.

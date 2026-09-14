@@ -942,13 +942,19 @@ describe("agent-runner session persistence", () => {
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+    const dir = mkdtempSync(join(tmpdir(), "subagents-resume-"));
+    const file = join(dir, "explore.jsonl");
+    try {
+      writeFileSync(file, `${JSON.stringify({ type: "session", version: 3, id: "saved-session", cwd: "/tmp", timestamp: new Date().toISOString() })}\n`);
+      await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: file, resumeSessionId: "saved-session" });
 
-    // Neither create nor inMemory: both would start an empty conversation, and
-    // the point of a resume is that the history is already there.
-    expect(sessionManagerCreate).not.toHaveBeenCalled();
-    expect(sessionManagerInMemory).not.toHaveBeenCalled();
-    expect(sessionManagerOpen).toHaveBeenCalledWith("/sessions/explore.jsonl", "/normal/pi/sessions");
+      // Neither create nor inMemory: both would discard the saved conversation.
+      expect(sessionManagerCreate).not.toHaveBeenCalled();
+      expect(sessionManagerInMemory).not.toHaveBeenCalled();
+      expect(sessionManagerOpen).toHaveBeenCalledWith(file, "/normal/pi/sessions");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("uses pi's normal persistent session location and links to the parent session", async () => {

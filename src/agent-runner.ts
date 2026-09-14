@@ -26,6 +26,7 @@ import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
+import { validateResumeSession } from "./resume-store.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -415,6 +416,8 @@ export interface RunOptions {
    * under the type's *current* definition, not the one the original run used.
    */
   resumeSessionFile?: string;
+  /** Expected on-disk session identity, captured by the manager. */
+  resumeSessionId?: string;
   /**
    * True when another agent spawned this one. Only top-level agents get a
    * handle, so only they can be reopened by name — which is the whole reason
@@ -614,6 +617,7 @@ export async function runAgent(
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
+  options.signal?.throwIfAborted();
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
 
@@ -830,12 +834,12 @@ export async function runAgent(
   }
 
   // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
+  const model = options.resumeSessionFile ? undefined : options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
 
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
+  const thinkingLevel = options.resumeSessionFile ? undefined : options.thinkingLevel ?? agentConfig?.thinking;
 
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
@@ -960,6 +964,8 @@ export async function runAgent(
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`.
   const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  options.signal?.throwIfAborted();
+  if (options.resumeSessionFile) validateResumeSession(options.resumeSessionFile, options.resumeSessionId);
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
@@ -1047,7 +1053,9 @@ export async function runAgent(
     });
   }
 
+  // Publish a fully initialized session before the first prompt/checkpoint.
   options.onSessionCreated?.(session);
+  options.signal?.throwIfAborted();
 
   // Track turns for graceful max_turns enforcement
   let turnCount = 0;
@@ -1103,7 +1111,7 @@ export async function runAgent(
 
   // Build the effective prompt: optionally prepend parent context
   let effectivePrompt = prompt;
-  if (options.inheritContext) {
+  if (options.inheritContext && !options.resumeSessionFile) {
     const parentContext = buildParentContext(ctx);
     if (parentContext) {
       effectivePrompt = parentContext + prompt;
@@ -1115,6 +1123,7 @@ export async function runAgent(
   const startLen = session.messages.length;
   let structuredRetried = false;
   try {
+    options.signal?.throwIfAborted();
     await session.prompt(effectivePrompt);
 
     // One more prompt when a schema was asked for and nothing usable came back

@@ -19,9 +19,11 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { resolveEffectiveMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
+import { ResumeStore, validateResumeSession } from "./resume-store.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -65,13 +67,6 @@ const DEFAULT_MAX_CONCURRENT = 10;
  * cache (#253) — opt in; everyone else keeps today's behaviour exactly.
  */
 const DEFAULT_MAX_CONCURRENT_FOREGROUND = 0;
-
-/**
- * How many evicted agents stay addressable by name. Only a bound on memory —
- * a session that spawns hundreds of agents shouldn't retain every one — and
- * far above the handful anyone keeps in their head.
- */
-const MAX_TOMBSTONES = 100;
 
 /**
  * Validate a caller-supplied SpawnOptions.cwd. `undefined`/`null` mean "unset"
@@ -181,6 +176,8 @@ interface SpawnOptions {
    * the type's CURRENT config.
    */
   resumeSessionFile?: string;
+  /** Internal cold-recovery capability, never accepted from external spawn callers. */
+  restore?: AgentTombstone;
   /**
    * Take an evicted agent's names back verbatim instead of allocating fresh
    * ones, so a resumed conversation keeps the handle the user just typed —
@@ -362,6 +359,12 @@ async function shutdownChildSession(session: AgentSession | undefined): Promise<
 
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
+  private store?: ResumeStore;
+  private persistenceError?: Error;
+  private recordStores = new WeakMap<AgentRecord, ResumeStore>();
+  private inFlight = new Set<string>();
+  private closing = new Map<string, Promise<void>>();
+  private disposed = false;
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -427,6 +430,45 @@ export class AgentManager {
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
+  }
+
+  /** Load lazy descriptors only. No child sessions or interrupted tasks are started. */
+  configurePersistence(parentFile: string | undefined, parentId: string): void {
+    if (this.disposed) throw new Error("Agent manager is shutting down");
+    this.store = undefined;
+    this.persistenceError = undefined;
+    this.tombstones.clear();
+    if (!parentFile) return;
+    try {
+      this.store = new ResumeStore(parentFile, parentId);
+      for (const entry of this.store.list()) this.tombstones.set(entry.handle, entry);
+    } catch (error) {
+      this.persistenceError = error instanceof Error ? error : new Error(String(error));
+      throw this.persistenceError;
+    }
+  }
+
+  /** Save while the child exists, not only when the ten-minute GC happens. */
+  private persistRecord(record: AgentRecord): void {
+    if (!record.handle || !record.sessionFile || !record.resumeState) return;
+    const entry: AgentTombstone = {
+      id: record.id, type: record.type, handle: record.handle, alias: record.alias,
+      description: record.description, sessionFile: record.sessionFile,
+      completedAt: record.completedAt ?? Date.now(), status: record.status,
+      resumeState: { ...record.resumeState, invocation: record.invocation },
+    };
+    this.recordStores.get(record)?.put(entry);
+    if (this.agents.get(record.id) === record) this.tombstones.set(entry.handle, entry);
+  }
+
+  /** Lifecycle writes must not double-release a concurrency slot when they fail. */
+  private persistSettled(record: AgentRecord): void {
+    try { this.persistRecord(record); }
+    catch (error) {
+      record.status = "error";
+      record.error = error instanceof Error ? error.message : String(error);
+      console.warn(`[pi-subagents] ${record.error}`);
+    }
   }
 
   /** Update the max concurrent background agents limit. */
@@ -496,9 +538,32 @@ export class AgentManager {
     // Validate before the queue branch — a queued spawn should fail at the
     // call, not minutes later at drain. Throw (not warn): programmatic callers
     // can fix and retry; the RPC layer converts throws into error envelopes.
+    if (this.disposed) throw new Error("Agent manager is shutting down");
+    if (this.persistenceError) throw this.persistenceError;
+    const restore = options.restore;
+    if (restore) {
+      type = restore.type;
+      if (!restore.resumeState) throw new Error(`Agent "${restore.id}" has no saved execution metadata to resume safely`);
+      if (this.agents.has(restore.id) || this.inFlight.has(restore.id)) throw new Error(`Agent "${restore.id}" is still running or settling`);
+      validateResumeSession(restore.sessionFile, restore.resumeState.sessionId);
+      options = {
+        ...options,
+        description: restore.description,
+        reclaim: { handle: restore.handle, alias: restore.alias },
+        resumeSessionFile: restore.sessionFile,
+        cwd: restore.resumeState.cwd,
+        configCwd: restore.resumeState.configCwd,
+        isolated: restore.resumeState.isolated || getAgentConfig(type)?.isolated === true,
+        inheritContext: false,
+        maxTurns: restore.resumeState.maxTurns,
+        // Reuse the stored tree, never create a fresh tree or fall back to main.
+        isolation: undefined,
+        invocation: restore.resumeState.invocation,
+      };
+    }
     assertValidSpawnCwd(options.cwd);
 
-    const id = randomUUID().slice(0, 17);
+    const id = restore?.id ?? randomUUID().slice(0, 17);
     const abortController = new AbortController();
     const record: AgentRecord = {
       id,
@@ -543,6 +608,11 @@ export class AgentManager {
       rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
+    if (this.store) this.recordStores.set(record, this.store);
+    if (restore) {
+      record.sessionFile = restore.sessionFile;
+      record.resumeState = restore.resumeState;
+    }
     // After the insert, so `takenHandles()` already counts this record's own
     // handle — a spawn named after its own type gets `explore-2`, not a
     // duplicate `explore` that would make resolution ambiguous.
@@ -620,10 +690,12 @@ export class AgentManager {
    *   handle goes back.
    */
   private launch(id: string, record: AgentRecord, args: SpawnArgs, queuedPool: Pool | undefined): Promise<void> {
+    this.inFlight.add(id);
     const startup = this.startAgent(id, record, args).then(
       () => { this.startups.delete(id); },
       (err) => {
         this.startups.delete(id);
+        this.inFlight.delete(id);
         if (queuedPool !== undefined) {
           // Mirrors settleRun: an inline caller gets this failure as a throw
           // out of spawnAndWait, so an unconsumed record would ALSO nudge the
@@ -702,6 +774,21 @@ export class AgentManager {
     if (pool === "background") this.runningBackground++;
     else if (pool === "foreground") this.runningForeground++;
 
+    // Reserve the pool slot before waiting for the evicted SDK session to close.
+    // Otherwise drainQueue could launch every cold resume past the pool limit.
+    if (options.restore) {
+      try {
+        await this.closing.get(id);
+        if (this.disposed || record.abortController?.signal.aborted) throw new Error("Agent recovery cancelled during shutdown");
+        validateResumeSession(options.restore.sessionFile, options.restore.resumeState?.sessionId);
+        assertValidSpawnCwd(options.restore.resumeState?.configCwd);
+        assertValidSpawnCwd(options.cwd);
+      } catch (error) {
+        releaseSlot();
+        throw error;
+      }
+    }
+
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done BEFORE
     // the run is kicked off so a failure doesn't leave a half-running agent.
@@ -733,8 +820,9 @@ export class AgentManager {
       // synchronous. The record is already terminal, so launching the run would
       // burn tokens on work nobody is waiting for: discard the fresh (and by
       // definition unchanged) worktree instead.
-      if (record.status !== "running") {
+      if (record.status !== "running" || this.disposed) {
         releaseSlot();
+        this.inFlight.delete(id);
         record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
         this.drainQueue();
         return;
@@ -768,6 +856,7 @@ export class AgentManager {
       thinkingLevel: options.thinkingLevel,
       structuredOutput: options.structuredOutput,
       resumeSessionFile: options.resumeSessionFile,
+      resumeSessionId: options.restore?.resumeState?.sessionId,
       nested: options.parentAgentId !== undefined,
       workflow: options.workflowId !== undefined,
       // Worktree wins for the working dir (the agent must run in the copy —
@@ -778,7 +867,7 @@ export class AgentManager {
       cwd: worktreeCwd ?? customCwd,
       // Set iff a worktree was created (see above) — names the directory the
       // copy came from, so the prompt can tell the agent not to work there.
-      worktreeBase: worktreeCwd ? baseCwd : undefined,
+      worktreeBase: options.restore?.resumeState?.worktreeBase ?? (worktreeCwd ? baseCwd : undefined),
       configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
@@ -804,6 +893,10 @@ export class AgentManager {
         maxSubagentDepth: record.maxSubagentDepth,
       },
       onSessionCreated: (session) => {
+        if (this.disposed || this.agents.get(id) !== record || record.abortController?.signal.aborted) {
+          void shutdownChildSession(session);
+          throw new Error("Agent session creation cancelled during shutdown");
+        }
         record.session = session;
         // Capture now, while the session object exists: after eviction this
         // path is the only thing that can reopen the conversation, and an
@@ -835,6 +928,20 @@ export class AgentManager {
               record.invocation.requestedThinking = requested;
             }
           }
+        }
+        const sessionId = session.sessionManager?.getSessionId?.();
+        if (record.sessionFile && sessionId) {
+          record.resumeState = {
+            sessionId,
+            cwd: worktreeCwd ?? customCwd ?? ctx.cwd,
+            configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : worktreeCwd ?? ctx.cwd),
+            isolated: options.isolated === true,
+            maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns),
+            thinkingLevel: session.thinkingLevel,
+            worktreeBase: options.restore?.resumeState?.worktreeBase ?? (worktreeCwd ? baseCwd : undefined),
+            invocation: record.invocation,
+          };
+          this.persistRecord(record);
         }
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
@@ -966,6 +1073,8 @@ export class AgentManager {
    *   the release disagree with the acquire.
    */
   private settleRun(record: AgentRecord, guardCallback: boolean, pool: Pool | undefined): void {
+    this.inFlight.delete(record.id);
+    this.persistSettled(record);
     if (!record.isBackground) record.resultConsumed = true;
     if (pool === "background") this.runningBackground--;
     else if (pool === "foreground") this.runningForeground--;
@@ -1006,6 +1115,7 @@ export class AgentManager {
    * eligible entry keeps FIFO within each pool, which is what callers see.
    */
   private drainQueue() {
+    if (this.disposed) return;
     for (;;) {
       const i = this.queue.findIndex(e => this.poolHasRoom(e.pool));
       if (i === -1) return;
@@ -1111,7 +1221,9 @@ export class AgentManager {
     options?: ResumeOptions,
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
-    if (!record?.session) return undefined;
+    if (this.disposed || !record?.session || this.inFlight.has(id)
+      || record.status === "running" || record.status === "queued") return undefined;
+    if (record.resumeState) assertValidSpawnCwd(record.resumeState.cwd);
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
@@ -1129,8 +1241,6 @@ export class AgentManager {
       // whose settle path would abort the LIVE run's children and report a
       // failure for a run that is still going. Refuse instead, leaving the
       // record untouched; the caller decides whether to wait or steer.
-      if (record.status === "running" || record.status === "queued") return undefined;
-
       record.isBackground = true;
       record.resultConsumed = false;
       record.result = undefined;
@@ -1167,6 +1277,10 @@ export class AgentManager {
     }
 
     // Foreground resume: run inline and return the settled record.
+    this.inFlight.add(id);
+    const abortController = new AbortController();
+    record.abortController = abortController;
+    const resumeSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
     record.status = "running";
     record.startedAt = Date.now();
     record.completedAt = undefined;
@@ -1189,11 +1303,11 @@ export class AgentManager {
           this.onCompact?.(record, info);
           options?.onCompaction?.(info);
         },
-        signal,
+        signal: resumeSignal,
       });
       // Same contract as the spawn path (#144): a failed final turn is an
       // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
+      record.status = abortController.signal.aborted ? "stopped" : failure ? "error" : "completed";
       if (failure) record.error = failure;
       record.result = text;
       record.completedAt = Date.now();
@@ -1203,6 +1317,8 @@ export class AgentManager {
       record.completedAt = Date.now();
     }
 
+    this.inFlight.delete(id);
+    this.persistSettled(record);
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
@@ -1224,7 +1340,9 @@ export class AgentManager {
     parentSignal: AbortSignal | undefined,
     options: ResumeOptions,
   ) {
-    if (!record.session) return;
+    if (this.disposed || !record.session) return;
+    if (record.resumeState) assertValidSpawnCwd(record.resumeState.cwd);
+    this.inFlight.add(id);
 
     record.status = "running";
     record.startedAt = Date.now();
@@ -1251,6 +1369,8 @@ export class AgentManager {
     try { options.onStarted?.(); } catch { /* ignore caller wiring errors */ }
 
     const settle = () => {
+      this.inFlight.delete(id);
+      this.persistSettled(record);
       detachParentSignal?.();
       detachParentSignal = undefined;
       // Final flush of streaming output file
@@ -1360,7 +1480,7 @@ export class AgentManager {
     const wanted = name.toLowerCase();
     let fallback: AgentRecord | undefined;
     for (const record of this.agents.values()) {
-      if (record.parentAgentId !== undefined) continue;
+      if (!isTopLevelAgent(record)) continue;
       // Handle and alias share one namespace, so at most one agent answers a
       // name and it makes no difference which of the two matched.
       if (record.handle?.toLowerCase() !== wanted && record.alias?.toLowerCase() !== wanted) continue;
@@ -1369,7 +1489,7 @@ export class AgentManager {
     }
     if (fallback) return { kind: "live", record: fallback };
     const byId = this.agents.get(name);
-    if (byId?.parentAgentId === undefined && byId !== undefined) return { kind: "live", record: byId };
+    if (byId !== undefined && isTopLevelAgent(byId)) return { kind: "live", record: byId };
     // Only once nothing live answers: a tombstone is a conversation to reopen,
     // and reopening one while its record still exists would fork the session.
     for (const entry of this.tombstones.values()) {
@@ -1439,7 +1559,8 @@ export class AgentManager {
     // Fire-and-forget is right here and only here: this runs from the 60s cleanup timer
     // and from `clearCompleted()` on session boundaries, with the process staying alive,
     // so handlers get their full window. The quit path awaits instead — see dispose().
-    void shutdownChildSession(session);
+    const shutdown = shutdownChildSession(session).finally(() => { this.closing.delete(id); });
+    this.closing.set(id, shutdown);
   }
 
   /**
@@ -1458,20 +1579,16 @@ export class AgentManager {
       description: record.description,
       sessionFile: record.sessionFile,
       completedAt: record.completedAt ?? Date.now(),
+      resumeState: record.resumeState,
+      status: record.status,
     });
-    // Bound the memory a long session can accumulate. Oldest first, since the
-    // agent someone still wants to reach is the one they used most recently.
-    while (this.tombstones.size > MAX_TOMBSTONES) {
-      const oldest = [...this.tombstones.values()].reduce((a, b) => (a.completedAt <= b.completedAt ? a : b));
-      this.tombstones.delete(oldest.handle);
-    }
   }
 
   private cleanup() {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
-      if ((record.completedAt ?? 0) >= cutoff) continue;
+      if (this.inFlight.has(id) || (record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
   }
@@ -1485,7 +1602,7 @@ export class AgentManager {
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
-      if (skipUnconsumed && !record.resultConsumed) continue;
+      if (this.inFlight.has(id) || (skipUnconsumed && !record.resultConsumed)) continue;
       this.removeRecord(id, record);
     }
     // Unconditional: both callers are session boundaries (`session_start` and
@@ -1555,7 +1672,10 @@ export class AgentManager {
    *   it (tests, teardown of a manager that never spawned) skips the prune.
    */
   async dispose(pi?: ExtensionAPI): Promise<void> {
+    this.disposed = true;
     clearInterval(this.cleanupInterval);
+    this.abortAll();
+    for (const record of this.agents.values()) this.persistSettled(record);
     // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
     // rather than left awaiting a gate nothing will ever resolve.
     this.dequeue(() => true);
@@ -1576,6 +1696,6 @@ export class AgentManager {
     // Awaited, unlike the eviction path: pi awaits this extension's `session_shutdown`
     // handler and the process exits right after it returns, so anything left unawaited
     // here never runs at all. Bounded — each call carries its own ceiling, concurrently.
-    await Promise.all(sessions.map(session => shutdownChildSession(session)));
+    await Promise.all([...this.closing.values(), ...sessions.map(session => shutdownChildSession(session))]);
   }
 }

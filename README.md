@@ -75,6 +75,25 @@ Agent({
 
 Agents run in the background by default: the call returns an ID immediately and notifies you on completion, carrying a preview of the result (use `get_subagent_result` for the full text). Pass `run_in_background: false` to block until the agent finishes and get its full output inline.
 
+### Restart-safe resume
+
+After an agent has written its first assistant checkpoint, close Pi and reopen the **same parent conversation**:
+
+```bash
+pi -c                 # continue the most recent session in this project
+pi -r                 # select the original parent if another session is newer
+```
+
+Then ask the model to call `Agent` with `resume: "<original-agent-id>"`, or type `@handle <follow-up>` in the TUI. Keep the original `subagent_type` in examples; the required field is ignored on resume in favor of the stored identity. Nothing resumes automatically at startup, and interrupted tasks are not replayed: an explicit follow-up continues from the last saved conversation checkpoint, not from a suspended tool execution.
+
+Cold resume keeps the stored type, execution/config directories and isolation restrictions. It loads the current definition's prompt, tools and extensions, while Pi restores conversation model/thinking state from the session (subject to SDK model-availability fallback). Caller type/model/isolation overrides are ignored on resume; unavailable or disabled stored types are errors, not fallback spawns.
+
+The resume index is `subagents/<parent-session-id>/resume-registry.json` beside the parent's session file. It records child session paths and IDs plus execution metadata; the child JSONL session remains the conversation source of truth. Writes are atomic and owner-only. Registry/session errors are reported instead of silently starting an empty conversation. A missing, corrupt or mismatched child session, unavailable agent type, or vanished execution directory/worktree is refused. A completed worktree agent normally cannot resume because its worktree was removed; start a new agent against its saved branch instead.
+
+**Pod restarts require persistent storage:** mount the parent session directory, child session directories (including any `session_dir` override), project/config files and required working directories at the **same absolute paths** in the new Pod. Pi's default session files live under `$PI_CODING_AGENT_DIR/sessions` (normally `~/.pi/agent/sessions`). The `.output` files under `/tmp` are optional display transcripts, not resume storage. Keep only **one active Pi writer per parent session**; concurrent Pods sharing one parent/index are not supported.
+
+`rememberAgents` defaults to `true`; `persist_session: false` opts an agent out and `persist_session: true` overrides the project default. Ephemeral parents (`--no-session`) have no durable index. Existing files are not deleted when persistence is turned off. Pi does not flush a new child session until its first assistant message, so a shutdown before that checkpoint may leave an index entry without a resumable conversation. Agents from before this fix have no durable ID index unless they are still live when this version records them. A fresh parent, a forked parent, or missing persistent volumes cannot recover old IDs through `Agent(resume)`.
+
 ### Scheduling
 
 Add a `schedule` field to register the agent to fire later instead of running now:
@@ -196,7 +215,7 @@ Two things to weigh against `direct`: the clone re-sends the whole conversation,
 
 **Named agents.** The `Agent` tool takes an optional `name`, so the orchestrator can call one `auth-audit` instead of leaving you to tell `@explore-2` from `@explore-3`. A name is *additive*: the type-derived handle is still assigned, so `@explore` keeps reaching that agent rather than starting a second one beside it. Both names share one namespace — an alias can never shadow a live handle or the reverse — and the popup shows one row per agent, under its alias, with the type moved into the description. `steer_subagent` and `get_subagent_result` accept a handle too, so you and the model address agents the same way.
 
-**Resuming much later.** Because subagent sessions are persisted by default ([`rememberAgents`](#persistent-settings)), a handle keeps working after the agent's in-memory record is evicted: `@explore anything else?` reopens the conversation from disk. Only the *definition* is re-resolved, so a continuation runs under the agent type's current frontmatter, not the one the first run used. If the type has since been deleted or disabled, the resume is refused rather than falling back to another agent — re-enable it and the handle works again. Names from an evicted agent stay reserved, so a later Explore becomes `explore-2` rather than shadowing something you can still reach; the 100 most recent are kept, and all of them are forgotten on `/new` and session switch. A resumed agent takes those names back, so `@explore` keeps meaning the same conversation. An agent whose session was only ever in memory leaves nothing to reopen, and the mention starts a fresh one instead; if the session file has since been deleted, the mention says so and frees the handle rather than silently sending your message to a new agent.
+**Resuming much later.** Persisted top-level agents retain their original ID, handle and alias after the ten-minute memory cleanup and after Pi exits. `Agent({ resume: "<original-id>", ... })` and `@explore anything else?` reopen the same conversation from disk. Names stay reserved without a 100-agent limit. Resume is scoped to the **same parent session**, not every session in the project: use `pi -c` or `pi -r` to reopen that parent after restarting. `/new` has its own namespace; returning to the original parent restores its agents. See [Restart-safe resume](#restart-safe-resume) for storage requirements and limits.
 
 The grammar mirrors Claude Code's, and is deliberately narrow so nothing gets swallowed by accident:
 
@@ -414,7 +433,7 @@ Launch a sub-agent.
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `run_in_background` | boolean | no | Defaults to `true`; `false` blocks and returns the result inline |
-| `resume` | string | no | Agent ID to resume a previous session |
+| `resume` | string | no | Original agent ID (or handle) to continue; survives GC and Pi restart when reopening the same persisted parent session |
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated git worktree; `off` (the default) does not. Absent from the schema entirely when `worktreeIsolation: false` |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
@@ -689,7 +708,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, max foreg
 
 **Background by default** (`backgroundByDefault`, default `true`): what an `Agent` call that doesn't say means. On — following Claude Code — the agent runs detached, the call returns its ID immediately, and a completion notification carries a preview of the result (`get_subagent_result` for the full text). Set `false` to restore the previous behaviour, where an unqualified spawn blocked the turn and returned its output inline. An explicit `run_in_background` on the call, or in an agent file's frontmatter, overrides this in both directions; the setting only decides what "unspecified" means. **Top-level only** — a nested spawn (an agent spawning its own) always defaults to foreground, because a detached child is stopped when its parent settles and has no notification path of its own. Toggle via `/agents → Settings → Background by default`; applied live.
 
-**Remember agents** (`rememberAgents`, default `true`): whether subagents persist their pi session, which is what lets [`@handle`](#agent-mentions) reopen an agent's conversation after its in-memory record has been evicted. Two visible consequences of the default: top-level subagents write a session file, and they nest under the session that spawned them in pi's `/resume`. Agents spawned by another agent are excluded — they get no handle, so nothing could reopen their transcript. A custom agent's `persist_session` frontmatter overrides this per agent, in both directions. Toggle via `/agents → Settings → Remember agents`; with it off, handles expire with their record (roughly ten minutes past completion) and `@explore` then starts a fresh agent rather than resuming — the behaviour before this setting existed.
+**Remember agents** (`rememberAgents`, default `true`): whether subagents persist their pi session, which lets `Agent(resume)` and [`@handle`](#agent-mentions) reopen an agent's conversation after memory cleanup or a process restart into the same parent session. Two visible consequences of the default: top-level subagents write a session file, and they nest under the session that spawned them in pi's `/resume`. Agents spawned by another agent are excluded — they get no handle, so nothing could reopen their transcript. A custom agent's `persist_session` frontmatter overrides this per agent, in both directions. Toggle via `/agents → Settings → Remember agents`; with it off, handles expire with their record (roughly ten minutes past completion) and `@explore` then starts a fresh agent rather than resuming — the behaviour before this setting existed.
 
 **Output transcript** (`outputTranscript`, default `true`): the project/global default for writing each subagent's `.output` transcript. Toggle via `/agents → Settings → Output transcript`, or set `false` in `subagents.json` to make transcripts opt-in project-wide — useful when run transcripts shouldn't sit on disk for backup or DLP tooling to pick up. A custom agent's `output_transcript` frontmatter overrides this per agent. Applied live at spawn time. Governs only the transcript, not `persist_session`, worktree commits, or memory files.
 
@@ -1009,6 +1028,7 @@ src/
   # Execution
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
+  resume-store.ts     # Durable parent-scoped resume index and session validation
   nested-tools.ts     # Delegation tools handed to subagents (nested spawn/collect/steer)
   child-context.ts    # AsyncLocalStorage flag marking work done for a child session
   abortable.ts        # Race a wait against Esc without cancelling the background child

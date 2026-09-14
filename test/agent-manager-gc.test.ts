@@ -235,7 +235,7 @@ describe("AgentManager — tombstones outliving the GC", () => {
     expect(resolved).toMatchObject({ record: { id } });
   });
 
-  it("drops the oldest once the cap is reached, keeping the most recent", async () => {
+  it("keeps every resumable descriptor beyond 100 agents", async () => {
     manager = new AgentManager();
     for (let i = 0; i < 101; i++) {
       const { record } = await evictable("Explore", `run-${i}`, `/sessions/${i}.jsonl`);
@@ -246,8 +246,8 @@ describe("AgentManager — tombstones outliving the GC", () => {
     }
     await vi.advanceTimersByTimeAsync(TICK);
 
-    expect(manager.listTombstones()).toHaveLength(100);
-    expect(manager.resolveMention("explore")).toBeUndefined(); // run-0's handle
+    expect(manager.listTombstones()).toHaveLength(101);
+    expect(manager.resolveMention("explore")?.kind).toBe("tombstone");
     expect(manager.resolveMention("explore-101")?.kind).toBe("tombstone");
   });
 
