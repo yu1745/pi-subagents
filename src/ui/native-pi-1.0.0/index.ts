@@ -50,7 +50,7 @@ export function getNativeSessionViewUnavailableReason(): string {
   } catch {
     // SDK-shaped test hosts and non-Pi loaders need not expose runtime metadata.
   }
-  return unavailableReason ?? `Readonly child viewing requires the Pi ${SUPPORTED_PI_VERSION} TUI runtime patch. Reload the extension or restart Pi; no mutable viewer fallback is available.`;
+  return unavailableReason ?? `Native readonly child viewing requires the Pi ${SUPPORTED_PI_VERSION} TUI runtime patch. Reload the extension or restart Pi to enable native viewing.`;
 }
 
 function openView(state: Registry, mode: NativeMode, session: AgentSession, theme: Theme, options: ViewOptions): Promise<void> {

@@ -22,6 +22,7 @@ import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
+import { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import { ctx, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 import { flushViews, nativeViewer } from "./helpers/session-view.js";
 
@@ -63,13 +64,21 @@ describe("readonly native viewing through the real extension", () => {
       return { responseText: "done", session: session as unknown as AgentSession, aborted: false, steered: false };
     });
     let input: ((data: string) => { consume?: boolean } | undefined) | undefined;
+    const overlays: ConversationViewer[] = [];
     let pickedMenu = false;
     let pickedAgent = false;
     const ui = {
       ...ctx().ui,
       onTerminalInput: vi.fn((handler: typeof input) => { input = handler; return () => { input = undefined; }; }),
       getEditorText: () => "",
-      custom: vi.fn(() => { throw new Error("Mutable child overlay is forbidden"); }),
+      custom: vi.fn((factory: (...args: unknown[]) => unknown) => new Promise(resolve => {
+        const tui = { requestRender: vi.fn(), terminal: { columns: 120, rows: 40 } };
+        const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+        let viewer: ConversationViewer;
+        const done = () => { viewer.dispose(); resolve(undefined); };
+        viewer = factory(tui, theme, undefined, done) as ConversationViewer;
+        overlays.push(viewer);
+      })),
       ...(supported ? { viewSession: native.viewSession } : {}),
       select: vi.fn(async (title: string, options: string[]) => {
         if (title === "Agents" && !pickedMenu) {
@@ -101,7 +110,7 @@ describe("readonly native viewing through the real extension", () => {
       input?.("\x1b[B"); input?.("\x1b[B"); input?.("\r");
       await flushViews();
     };
-    return { ...booted, native, ui, context, record, session, finish, openMenu, openFleet, press: (data: string) => input?.(data) };
+    return { ...booted, native, overlays, ui, context, record, session, finish, openMenu, openFleet, press: (data: string) => input?.(data) };
   }
 
   it("/agents uses the live readonly session and returns to its list on normal close", async () => {
@@ -142,14 +151,49 @@ describe("readonly native viewing through the real extension", () => {
     expect(h.ui.custom).not.toHaveBeenCalled();
   });
 
-  it.each(["menu", "fleet"])("unavailable runtime patch warns from %s without a mutable fallback", async entry => {
+  it.each(["menu", "fleet"])("unavailable runtime patch opens a retained fallback from %s", async entry => {
     const h = await boot(false);
-    if (entry === "menu") await h.openMenu();
-    else await h.openFleet();
-    expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Pi 1.0.0 runtime patch"), "warning");
+    const menu = entry === "menu" ? h.openMenu() : undefined;
+    if (entry === "fleet") await h.openFleet();
+    await flushViews();
+    expect(h.ui.custom).toHaveBeenCalledOnce();
+    expect(h.overlays[0]).toBeInstanceOf(ConversationViewer);
+    expect(h.overlays[0].render(120).join("\n")).toContain("public progress");
     expect(h.native.viewSession).not.toHaveBeenCalled();
-    expect(h.ui.custom).not.toHaveBeenCalled();
     expect(h.record.resultConsumed).toBeUndefined();
+    for (const key of ["\x1b[B", "\r", "x"]) expect(h.press(key)).toBeUndefined();
+    h.finish();
+    await h.record.promise;
+    h.record.resultConsumed = true;
+    await vi.advanceTimersByTimeAsync(12 * 60_000);
+    expect(h.record.session).toBe(h.session);
+    expect(h.session.dispose).not.toHaveBeenCalled();
+    h.overlays[0].handleInput("\x1b");
+    await menu;
+    await flushViews();
+    expect(h.record.session).toBeUndefined();
+    expect(h.session.dispose).toHaveBeenCalledOnce();
+    expect(h.session.steer).not.toHaveBeenCalled();
+    expect(h.session.prompt).not.toHaveBeenCalled();
+  });
+
+  it.each(["session_before_switch", "session_shutdown"])("%s closes the fallback without reopening old menus", async event => {
+    const h = await boot(false);
+    const menu = h.openMenu();
+    await flushViews();
+    expect(h.overlays).toHaveLength(1);
+    const selects = h.ui.select.mock.calls.length;
+    await h.lifecycle.get(event)({}, h.context);
+    await menu;
+    expect(h.ui.select).toHaveBeenCalledTimes(selects);
+    expect(h.ui.custom).toHaveBeenCalledOnce();
+    expect(h.session.subscribe.mock.results[0].value).toHaveBeenCalledOnce();
+    if (event === "session_before_switch") {
+      expect(h.record.abortController?.signal.aborted).toBe(false);
+      expect(h.session.dispose).not.toHaveBeenCalled();
+    } else {
+      expect(h.session.dispose).toHaveBeenCalledOnce();
+    }
   });
 
   it.each(["session_before_switch", "session_shutdown"])("%s closes the native view without reopening old menus", async event => {
@@ -200,7 +244,7 @@ describe("readonly native viewing through the real extension", () => {
     }
   });
 
-  it.each(["false", "throw"])("refuses viewing, not execution, when tracking returns %s", async failure => {
+  it.each(["false", "throw"])("uses the fallback without interrupting execution when tracking returns %s", async failure => {
     patch.track.mockImplementation(() => {
       if (failure === "throw") throw new Error("unsupported session shape");
       return false;
@@ -208,10 +252,15 @@ describe("readonly native viewing through the real extension", () => {
     const h = await boot();
     expect(patch.track).toHaveBeenCalledWith(h.session);
     expect(h.record.status).toBe("running");
-    await h.openMenu();
-    expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("tracker could not attach before execution"), "warning");
+    const menu = h.openMenu();
+    await flushViews();
+    expect(h.overlays[0]).toBeInstanceOf(ConversationViewer);
+    expect(h.ui.custom).toHaveBeenCalledOnce();
     expect(h.native.viewSession).not.toHaveBeenCalled();
     expect(h.record.abortController?.signal.aborted).toBe(false);
+    h.overlays[0].handleInput("\x1b");
+    await menu;
+    expect(h.ui.select.mock.calls.filter(([title]) => title === "Running agents")).toHaveLength(2);
   });
 
   it("does not disable child execution when patch installation is unsupported", async () => {

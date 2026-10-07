@@ -26,6 +26,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import { ctx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
 import { flushViews, nativeViewer } from "./helpers/session-view.js";
 
@@ -150,38 +151,53 @@ describe("the inspector opens a workflow agent's conversation", () => {
     await lifecycle.get("session_shutdown")({}, ui.context);
   });
 
-  it("restores the inspector when the runtime patch is unavailable, with no mutable fallback", async () => {
+  it.each(["missing", "throw", "reject"])("keeps the inspector hidden until the fallback closes: %s", async failure => {
     const { command, lifecycle } = await bootWithChild();
     const ui = overlayCtx();
-    delete ui.context.ui.viewSession;
+    if (failure === "missing") delete ui.context.ui.viewSession;
+    else ui.native.viewSession.mockImplementation(() => {
+      if (failure === "throw") throw new Error("native open failed");
+      return Promise.reject(new Error("native open failed"));
+    });
     void command.handler("", ui.context);
     await vi.waitFor(() => expect(ui.overlays).toHaveLength(1));
     const dialog = ui.overlays[0].instance;
     await vi.waitFor(() => expect(dialog.render?.(120).at(-1)).toContain("c convo"));
     dialog.handleInput?.("c");
     await flushViews();
-    expect(ui.context.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Pi 1.0.0 TUI runtime patch"), "warning");
+    expect(ui.overlays).toHaveLength(2);
+    expect(ui.overlays[1].instance).toBeInstanceOf(ConversationViewer);
+    expect(ui.overlays[1].options.overlay).toBe(true);
+    expect(ui.hidden).toEqual([true]);
+    dialog.handleInput?.("c");
+    await flushViews();
+    expect(ui.overlays).toHaveLength(2);
+    if (failure === "missing") expect(ui.native.viewSession).not.toHaveBeenCalled();
+    else expect(ui.native.viewSession).toHaveBeenCalledOnce();
+    ui.overlays[1].instance.handleInput?.("\x1b");
+    await flushViews();
     expect(ui.hidden).toEqual([true, false]);
-    expect(ui.overlays).toHaveLength(1);
-    expect(ui.native.viewSession).not.toHaveBeenCalled();
     ui.overlays[0].close();
     await lifecycle.get("session_shutdown")({}, ui.context);
   });
 
-  it("a late native close never unhides an inspector that already closed", async () => {
+  it.each(["native", "fallback"])("a late %s close never unhides an inspector that already closed", async viewer => {
     const { command, lifecycle } = await bootWithChild();
     const ui = overlayCtx();
     void command.handler("", ui.context);
     await vi.waitFor(() => expect(ui.overlays).toHaveLength(1));
     const dialog = ui.overlays[0].instance;
     await vi.waitFor(() => expect(dialog.render?.(120).at(-1)).toContain("c convo"));
+    if (viewer === "fallback") delete ui.context.ui.viewSession;
     dialog.handleInput?.("c");
     dialog.handleInput?.("c"); // a second key cannot start another child view
     await flushViews();
-    expect(ui.native.views).toHaveLength(1);
+    expect(ui.native.views).toHaveLength(viewer === "native" ? 1 : 0);
+    expect(ui.overlays).toHaveLength(viewer === "native" ? 1 : 2);
     ui.overlays[0].close();
     await flushViews();
-    ui.native.views[0].close();
+    if (viewer === "native") ui.native.views[0].close();
+    else ui.overlays[1].instance.handleInput?.("\x1b");
     await flushViews();
     expect(ui.hidden).toEqual([true]);
     await lifecycle.get("session_shutdown")({}, ui.context);

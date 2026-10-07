@@ -2,7 +2,8 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, type SessionViewLease } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
-import { openAgentSessionView } from "../src/ui/session-view.js";
+import { ConversationViewer } from "../src/ui/conversation-viewer.js";
+import { openAgentSessionView, type SessionViewUI } from "../src/ui/session-view.js";
 import { flushViews, nativeViewer } from "./helpers/session-view.js";
 
 vi.mock("../src/ui/native-pi-1.0.0/index.js", () => ({
@@ -19,6 +20,20 @@ import { resumeAgent, runAgent } from "../src/agent-runner.js";
 
 const TICK = 60_000;
 const RETENTION = 10 * TICK;
+
+function legacyViewer() {
+  const views: ConversationViewer[] = [];
+  const custom = vi.fn((factory: Parameters<NonNullable<SessionViewUI["custom"]>>[0]) => new Promise<undefined>(resolve => {
+    const done = () => { views.at(-1)?.dispose(); resolve(undefined); };
+    const component = factory(
+      { terminal: { rows: 30 }, requestRender: vi.fn() } as never,
+      { fg: (_color: string, text: string) => text, bold: (text: string) => text } as never,
+      undefined as never, done,
+    );
+    views.push(component as ConversationViewer);
+  }));
+  return { views, custom: custom as typeof custom & NonNullable<SessionViewUI["custom"]> };
+}
 
 describe("native session view leases", () => {
   let manager: AgentManager;
@@ -205,14 +220,116 @@ describe("native session view leases", () => {
     expect(manager.hasSessionViews()).toBe(false);
   });
 
-  it.each([undefined, null, "not callable"])("requires the exact-version runtime patch, without acquiring a lease: %s", async capability => {
+  it.each([undefined, null, "not callable"])("uses the existing overlay when the native API is unavailable: %s", async capability => {
+    const { record, session } = await settled();
+    const legacy = legacyViewer();
+    const ui = { notify: vi.fn(), custom: legacy.custom, viewSession: capability };
+    const handle = openAgentSessionView(manager, ui as never, record)!;
+    await flushViews();
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("Using the legacy conversation viewer"), "warning");
+    expect(legacy.custom).toHaveBeenCalledWith(expect.any(Function), {
+      overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: "70%" },
+    });
+    expect(legacy.views[0]).toBeInstanceOf(ConversationViewer);
+    expect(session.subscribe).toHaveBeenCalledOnce();
+    expect(manager.hasSessionViews()).toBe(true);
+    handle.close();
+    await handle.closed;
+    expect(manager.hasSessionViews()).toBe(false);
+    expect(session.subscribe.mock.results[0].value).toHaveBeenCalledOnce();
+  });
+
+  it("warns without acquiring a lease if neither viewer API exists", async () => {
     const { record } = await settled();
     const acquireSpy = vi.spyOn(manager, "acquireSessionView");
-    const ui = { notify: vi.fn(), custom: vi.fn(), viewSession: capability };
-    expect(openAgentSessionView(manager, ui as never, record)).toBeUndefined();
+    const ui = { notify: vi.fn() };
+    expect(openAgentSessionView(manager, ui, record)).toBeUndefined();
     expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("Pi 1.0.0 runtime patch"), "warning");
-    expect(ui.custom).not.toHaveBeenCalled();
     expect(acquireSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(["throw", "reject", "tracker"])("falls back after native failure while retaining the session: %s", async failure => {
+    const { record, session } = await settled();
+    const legacy = legacyViewer();
+    if (failure === "tracker") {
+      const acquireOriginal = manager.acquireSessionView.bind(manager);
+      vi.spyOn(manager, "acquireSessionView").mockImplementation(record => {
+        const lease = acquireOriginal(record)!;
+        return { ...lease, unavailableReason: "tracker missing" };
+      });
+    } else {
+      native.viewSession.mockImplementation(() => {
+        if (failure === "throw") throw new Error("native failed");
+        return Promise.reject(new Error("native failed"));
+      });
+    }
+    const ui = { notify: vi.fn(), custom: legacy.custom, viewSession: native.viewSession };
+    const handle = openAgentSessionView(manager, ui, record)!;
+    await flushViews();
+    expect(legacy.custom).toHaveBeenCalledOnce();
+    if (failure === "tracker") expect(native.viewSession).not.toHaveBeenCalled();
+    manager.clearCompleted();
+    expect(session.dispose).not.toHaveBeenCalled();
+    legacy.views[0].handleInput("\u001b");
+    await handle.closed;
+    await flushViews();
+    expect(manager.hasSessionViews()).toBe(false);
+    expect(session.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the legacy steer, stop and Markdown actions", async () => {
+    const { record } = await settled();
+    record.status = "running";
+    const steer = vi.spyOn(manager, "steer").mockReturnValue(true);
+    const abort = vi.spyOn(manager, "abort").mockReturnValue(true);
+    const markdown = vi.fn();
+    const legacy = legacyViewer();
+    const ui = { notify: vi.fn(), custom: legacy.custom };
+    const handle = openAgentSessionView(manager, ui, record, {
+      viewerMarkdown: () => "off", onMarkdownMode: markdown,
+    })!;
+    await flushViews();
+    const viewer = legacy.views[0];
+    viewer.render(100);
+    viewer.handleInput("m");
+    expect(markdown).toHaveBeenCalledWith("assistant");
+    viewer.handleInput("\r");
+    viewer.handleInput("continue");
+    viewer.handleInput("\r");
+    expect(steer).toHaveBeenCalledWith(record.id, "continue");
+    viewer.handleInput("x");
+    expect(abort).not.toHaveBeenCalled();
+    viewer.handleInput("x");
+    expect(abort).toHaveBeenCalledWith(record.id);
+    handle.close();
+    await handle.closed;
+  });
+
+  it("does not fall back when a native view fails after cancellation", async () => {
+    const { record } = await settled();
+    native = nativeViewer(false);
+    const legacy = legacyViewer();
+    const handle = openAgentSessionView(manager, {
+      notify: vi.fn(), viewSession: native.viewSession, custom: legacy.custom,
+    }, record)!;
+    await flushViews();
+    handle.close();
+    native.views[0].fail(new Error("cancelled"));
+    await handle.closed;
+    expect(legacy.custom).not.toHaveBeenCalled();
+    expect(manager.hasSessionViews()).toBe(false);
+  });
+
+  it("shutdown closes the fallback before disposing the child", async () => {
+    const { record, session } = await settled();
+    const legacy = legacyViewer();
+    const handle = openAgentSessionView(manager, { notify: vi.fn(), custom: legacy.custom }, record)!;
+    await flushViews();
+    await manager.dispose();
+    await handle.closed;
+    const unsubscribe = session.subscribe.mock.results[0].value;
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(unsubscribe.mock.invocationCallOrder[0]).toBeLessThan(session.dispose.mock.invocationCallOrder[0]);
   });
 
   it("refuses stale/sessionless records and acquisition after disposal", async () => {

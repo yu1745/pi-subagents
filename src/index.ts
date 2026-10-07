@@ -431,10 +431,19 @@ export default function (pi: ExtensionAPI) {
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
   function setShowModel(b: boolean): void { showModel = b; widget.update(); }
-  /** Legacy viewer preference retained on disk; native viewing uses core settings. */
+  /** Legacy fallback viewer preference; native viewing uses core settings. */
   let viewerMarkdown: ViewerMarkdownMode = "assistant";
   function getViewerMarkdown(): ViewerMarkdownMode { return viewerMarkdown; }
   function setViewerMarkdown(mode: ViewerMarkdownMode): void { viewerMarkdown = mode; }
+  /** The legacy viewer's m key persists silently, except on a failed save. */
+  function chooseViewerMarkdown(mode: ViewerMarkdownMode, ctx?: ExtensionCommandContext): void {
+    setViewerMarkdown(mode);
+    const { message, level } = saveAndEmitChanged(
+      snapshotSettings(), `Viewer markdown set to ${mode}`,
+      (event, payload) => pi.events.emit(event, payload),
+    );
+    if (level === "warning") ctx?.ui.notify(message, level);
+  }
   const pendingUsage = new PendingUsagePool();
 
   // ---- Cancellable pending notifications ----
@@ -1132,7 +1141,11 @@ export default function (pi: ExtensionAPI) {
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  const fleet = new FleetList(manager, isShowCostEnabled);
+  const fleet = new FleetList(manager, isShowCostEnabled, record => ({
+    activity: agentActivity.get(record.id),
+    viewerMarkdown: getViewerMarkdown,
+    onMarkdownMode: mode => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
+  }));
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -3276,7 +3289,12 @@ Terse command-style prompts produce shallow, generic work.
 
   async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
     const generation = uiGeneration;
-    const view = openAgentSessionView(manager, ctx.ui, record);
+    const view = openAgentSessionView(manager, ctx.ui, record, {
+      activity: agentActivity.get(record.id),
+      showCost,
+      viewerMarkdown: getViewerMarkdown,
+      onMarkdownMode: mode => chooseViewerMarkdown(mode, ctx),
+    });
     try {
       await view?.closed;
     } catch (error) {
@@ -3850,7 +3868,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           id: "viewerMarkdown",
           label: "Viewer markdown",
           description:
-            "Legacy overlay preference, retained for a separate settings migration. Native readonly child views use Pi core's rendering settings; this value does not affect them.",
+            "Markdown rendering in the legacy fallback viewer (m cycles the same setting). Native readonly child views use Pi core's rendering settings; this value does not affect them.",
           currentValue: getViewerMarkdown(),
           values: ["off", "assistant", "all"],
         },

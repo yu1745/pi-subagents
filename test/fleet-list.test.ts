@@ -4,6 +4,7 @@ import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 import { getDisplayName } from "../src/ui/agent-widget.js";
+import { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import {
   FleetList,
   type FleetUICtx,
@@ -11,6 +12,7 @@ import {
   formatFleetElapsed,
   formatFleetTokens,
 } from "../src/ui/fleet-list.js";
+import type { LegacyViewerOptions } from "../src/ui/session-view.js";
 import { flushViews, nativeViewer } from "./helpers/session-view.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
@@ -100,6 +102,7 @@ interface Harness {
   closeWorkflowDialog: () => Promise<void>;
   native: ReturnType<typeof nativeViewer>;
   custom: ReturnType<typeof vi.fn>;
+  legacy: () => ConversationViewer | undefined;
   /** Feed a key to the registered input handler; returns the consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
@@ -128,13 +131,17 @@ function makeWorkflow(over: Partial<FleetWorkflow> = {}): FleetWorkflow {
   };
 }
 
-function harness(agents: AgentRecord[]): Harness {
+function harness(agents: AgentRecord[], legacyOptions?: (record: AgentRecord) => LegacyViewerOptions): Harness {
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
   let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[] }) | undefined;
   let editorText = "";
   const native = nativeViewer();
-  const custom = vi.fn(() => { throw new Error("Mutable overlays must not open"); });
+  let legacy: ConversationViewer | undefined;
   const fakeTui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
+  const custom = vi.fn((factory: (...args: unknown[]) => unknown) => new Promise(resolve => {
+    const done = () => { legacy?.dispose(); resolve(undefined); };
+    legacy = factory(fakeTui, theme, undefined, done) as ConversationViewer;
+  }));
 
   const ui: FleetUICtx = {
     setWidget: (_key, content) => { widgetFactory = content as any; },
@@ -146,7 +153,7 @@ function harness(agents: AgentRecord[]): Harness {
 
   Object.assign(ui, { custom });
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager);
+  const fleet = new FleetList(manager, undefined, legacyOptions);
   fleet.setUICtx(ui);
   let workflows: FleetWorkflow[] = [];
   const openedWorkflows: string[] = [];
@@ -168,6 +175,7 @@ function harness(agents: AgentRecord[]): Harness {
     manager,
     native,
     custom,
+    legacy: () => legacy,
     press: (data) => inputHandler?.(data),
     render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
     setEditorText: (t) => { editorText = t; },
@@ -549,20 +557,25 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render().some(l => l.includes("the one"))).toBe(true); // and stays listed while viewed
   });
 
-  it("warns when the runtime patch is unavailable without opening a mutable fallback or pinning", async () => {
+  it("opens the legacy overlay without the runtime patch and retains its lease until close", async () => {
     const h = harness([makeRecord()]);
     h.ui.viewSession = undefined;
     h.press(DOWN);
     h.press(DOWN);
     h.press(ENTER);
     await flushViews();
-    expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Pi 1.0.0 TUI runtime patch"), "warning");
-    expect(h.manager.acquireSessionView).not.toHaveBeenCalled();
-    expect(h.custom).not.toHaveBeenCalled();
+    expect(h.custom).toHaveBeenCalledOnce();
+    expect(h.legacy()).toBeInstanceOf(ConversationViewer);
+    expect(h.manager.hasSessionViews()).toBe(true);
+    expect(h.native.viewSession).not.toHaveBeenCalled();
+    expect(h.press(UP)).toBeUndefined();
+    h.legacy()!.handleInput(ESC);
+    await flushViews();
+    expect(h.manager.hasSessionViews()).toBe(false);
     expect(h.press(UP)).toEqual({ consume: true });
   });
 
-  it.each(["throw", "reject"])("releases focus and lease when native opening fails: %s", async failure => {
+  it.each(["throw", "reject"])("falls back while retaining focus and lease when native opening fails: %s", async failure => {
     const h = harness([makeRecord()]);
     h.native.viewSession.mockImplementation(() => {
       if (failure === "throw") throw new Error("open failed");
@@ -572,10 +585,67 @@ describe("FleetList overlay lifecycle", () => {
     h.press(DOWN);
     h.press(ENTER);
     await flushViews();
+    expect(h.custom).toHaveBeenCalledOnce();
+    expect(h.legacy()).toBeInstanceOf(ConversationViewer);
+    expect(h.manager.hasSessionViews()).toBe(true);
+    expect(h.press(UP)).toBeUndefined();
+    h.legacy()!.handleInput(ESC);
+    await flushViews();
     expect(h.manager.hasSessionViews()).toBe(false);
-    expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("open failed"), "warning");
     expect(h.press(UP)).toEqual({ consume: true });
+  });
+
+  it("passes legacy settings through the fleet and keeps Markdown and steering controls usable", async () => {
+    const record = makeRecord({ lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0, cost: 0.0042 } });
+    const onMarkdownMode = vi.fn();
+    const options = vi.fn(() => ({ showCost: true, viewerMarkdown: () => "off" as const, onMarkdownMode }));
+    const h = harness([record], options);
+    h.ui.viewSession = undefined;
+    h.press(DOWN); h.press(DOWN); h.press(ENTER);
+    await flushViews();
+    expect(options).toHaveBeenCalledWith(record);
+    expect(h.legacy()!.render(400).join("\n")).toContain("$0.0042");
+    h.legacy()!.handleInput("m");
+    expect(onMarkdownMode).toHaveBeenCalledWith("assistant");
+    h.legacy()!.handleInput(ENTER);
+    h.legacy()!.handleInput("redirect");
+    h.legacy()!.handleInput(ENTER);
+    expect(h.manager.steer).toHaveBeenCalledWith(record.id, "redirect");
+    h.legacy()!.handleInput("x");
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    h.legacy()!.handleInput("x");
+    expect(h.manager.abort).toHaveBeenCalledWith(record.id);
+    h.legacy()!.handleInput(ESC);
+    await flushViews();
+    h.fleet.dispose();
+  });
+
+  it("does not start a fallback when a pending native failure arrives after disposal", async () => {
+    const h = harness([makeRecord()]);
+    let reject!: (error: Error) => void;
+    h.native.viewSession.mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+    h.press(DOWN); h.press(DOWN); h.press(ENTER);
+    await flushViews();
+    h.fleet.dispose();
+    reject(new Error("cancelled native open"));
+    await flushViews();
     expect(h.custom).not.toHaveBeenCalled();
+    expect(h.manager.hasSessionViews()).toBe(false);
+    expect(h.render()).toEqual([]);
+    expect(h.ui.notify).not.toHaveBeenCalled();
+  });
+
+  it("reports a fallback opening error once and restores fleet navigation", async () => {
+    const h = harness([makeRecord()]);
+    h.ui.viewSession = undefined;
+    h.custom.mockImplementation(() => { throw new Error("overlay failed"); });
+    h.press(DOWN); h.press(DOWN); h.press(ENTER);
+    await flushViews();
+    expect(h.custom).toHaveBeenCalledOnce();
+    expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("overlay failed"), "warning");
+    expect(h.manager.hasSessionViews()).toBe(false);
+    expect(h.press(UP)).toEqual({ consume: true });
+    h.fleet.dispose();
   });
 
   it("dispose aborts only presentation and late completion cannot restore the widget", async () => {
@@ -591,6 +661,21 @@ describe("FleetList overlay lifecycle", () => {
     await flushViews();
     expect(h.render()).toEqual([]);
     expect(h.manager.hasSessionViews()).toBe(false);
+    expect(h.manager.abort).not.toHaveBeenCalled();
+  });
+
+  it("dispose closes the fallback presentation and releases its lease without stopping the agent", async () => {
+    const record = makeRecord({ abortController: new AbortController() });
+    const h = harness([record]);
+    h.ui.viewSession = undefined;
+    h.press(DOWN); h.press(DOWN); h.press(ENTER);
+    await flushViews();
+    expect(h.manager.hasSessionViews()).toBe(true);
+    h.fleet.dispose();
+    await flushViews();
+    expect(h.manager.hasSessionViews()).toBe(false);
+    expect(h.render()).toEqual([]);
+    expect(record.abortController!.signal.aborted).toBe(false);
     expect(h.manager.abort).not.toHaveBeenCalled();
   });
 

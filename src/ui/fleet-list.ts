@@ -3,7 +3,7 @@
  *
  * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
  * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ● marker),
- * Enter opens the selected agent's native readonly conversation, Esc returns to the prompt.
+ * Enter opens the selected agent's conversation (native or legacy fallback), Esc returns to the prompt.
  * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
@@ -17,7 +17,7 @@ import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { formatCost, type Theme } from "./agent-widget.js";
-import { openAgentSessionView, type SessionViewUI } from "./session-view.js";
+import { type LegacyViewerOptions, openAgentSessionView, type SessionViewUI } from "./session-view.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -103,7 +103,7 @@ export class FleetList {
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
-  /** Set while a native view is open; aborts presentation, not execution. */
+  /** Set while a view is open; closes presentation, not execution. */
   private viewerClose: (() => void) | undefined;
   private viewerToken: symbol | undefined;
   private viewingAgentId: string | undefined;
@@ -127,6 +127,8 @@ export class FleetList {
      * `showCost` setting.
      */
     private showCost: () => boolean = () => false,
+    /** Existing overlay settings/activity, used only when native viewing is unavailable. */
+    private legacyViewerOptions?: (record: AgentRecord) => LegacyViewerOptions,
   ) {}
 
   // ---- Lifecycle ----
@@ -385,7 +387,9 @@ export class FleetList {
     }
     const record = entry.record;
     if (!this.ui) return;
-    const view = openAgentSessionView(this.manager, this.ui, record);
+    const view = openAgentSessionView(this.manager, this.ui, record, {
+      showCost: this.showCost(), ...this.legacyViewerOptions?.(record),
+    });
     if (!view) return;
     const token = Symbol();
     this.viewerToken = token;
