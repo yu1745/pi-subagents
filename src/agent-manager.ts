@@ -19,6 +19,7 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import * as PiSDK from "@earendil-works/pi-coding-agent";
 import { abortable } from "./abortable.js";
 import { resolveEffectiveMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
@@ -26,6 +27,8 @@ import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import { ResumeStore, validateResumeSession } from "./resume-store.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
+import { SUPPORTED_PI_VERSION } from "./ui/native-pi-1.0.0/index.js";
+import { installSessionViewTracking } from "./ui/native-pi-1.0.0/session-snapshot.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -358,6 +361,21 @@ async function shutdownChildSession(session: AgentSession | undefined): Promise<
   try { session?.dispose?.(); } catch { /* ignore */ }
 }
 
+/** A presentation-only pin. Release only after the viewer has detached. */
+export interface SessionViewLease {
+  session: AgentSession;
+  signal: AbortSignal;
+  unavailableReason?: string;
+  close(): void;
+  release(): void;
+}
+
+interface SessionViewRetention {
+  viewers: Set<{ controller: AbortController; released: Promise<void> }>;
+  /** A boundary removal wins over timed GC and must not resurrect old handles. */
+  removal?: { boundary: boolean; skipUnconsumed: boolean };
+}
+
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   private store?: ResumeStore;
@@ -366,6 +384,9 @@ export class AgentManager {
   private inFlight = new Set<string>();
   private closing = new Map<string, Promise<void>>();
   private disposed = false;
+  private sessionViews = new Map<AgentRecord, SessionViewRetention>();
+  private untrackedSessions = new WeakSet<AgentSession>();
+  private closingViews = 0;
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -898,6 +919,15 @@ export class AgentManager {
           void shutdownChildSession(session);
           throw new Error("Agent session creation cancelled during shutdown");
         }
+        // Attach before exposing the session or flushing queued steers. Never
+        // patch another Pi version, and never fail execution for a UI feature.
+        if ("VERSION" in PiSDK && PiSDK.VERSION === SUPPORTED_PI_VERSION) {
+          try {
+            if (!installSessionViewTracking(session)) this.untrackedSessions.add(session);
+          } catch {
+            this.untrackedSessions.add(session);
+          }
+        }
         record.session = session;
         // Capture now, while the session object exists: after eviction this
         // path is the only thing that can reopen the conversation, and an
@@ -1225,6 +1255,9 @@ export class AgentManager {
     if (this.disposed || !record?.session || this.inFlight.has(id)
       || record.status === "running" || record.status === "queued") return undefined;
     if (record.resumeState) assertValidSpawnCwd(record.resumeState.cwd);
+    // A sweep requested for the previous run cannot evict a new continuation.
+    const retention = this.sessionViews.get(record);
+    if (retention) retention.removal = undefined;
 
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
@@ -1584,9 +1617,72 @@ export class AgentManager {
     return true;
   }
 
-  /** Dispose a record's session and remove it from the map. */
-  private removeRecord(id: string, record: AgentRecord): void {
-    this.tombstone(record);
+  /**
+   * Synchronously pin this exact record/session before opening a native view.
+   * Presentation controllers never touch record.abortController or consumption.
+   */
+  acquireSessionView(record: AgentRecord): SessionViewLease | undefined {
+    if (this.disposed || this.closingViews || this.agents.get(record.id) !== record || !record.session) return undefined;
+    const session = record.session;
+    let retention = this.sessionViews.get(record);
+    if (!retention) {
+      retention = { viewers: new Set() };
+      this.sessionViews.set(record, retention);
+    }
+    const controller = new AbortController();
+    let resolveReleased!: () => void;
+    const viewer = { controller, released: new Promise<void>(resolve => { resolveReleased = resolve; }) };
+    retention.viewers.add(viewer);
+    return {
+      session,
+      signal: controller.signal,
+      unavailableReason: this.untrackedSessions.has(session)
+        ? "Readonly child viewing is unavailable: the Pi 1.0.0 session tracker could not attach before execution. Reload or restart Pi and create a new child session."
+        : undefined,
+      close: () => controller.abort(),
+      release: () => {
+        if (!retention.viewers.delete(viewer)) return;
+        if (retention.viewers.size === 0) {
+          this.sessionViews.delete(record);
+          const removal = retention.removal;
+          // Shutdown owns disposal after ALL viewers have detached. A resume
+          // may have started meanwhile; never dispose a running/settling run.
+          if (!this.disposed && removal && this.agents.get(record.id) === record
+            && record.session === session && record.status !== "running" && record.status !== "queued"
+            && !this.inFlight.has(record.id) && (!removal.skipUnconsumed || record.resultConsumed)
+            && (removal.boundary || (record.completedAt ?? 0) < Date.now() - 10 * 60_000)) {
+            this.removeRecord(record.id, record, removal.boundary, removal.skipUnconsumed);
+          }
+        }
+        resolveReleased();
+      },
+    };
+  }
+
+  /** All entrypoints yield terminal input while a native child view is up. */
+  hasSessionViews(): boolean { return this.sessionViews.size > 0; }
+
+  /** Close presentation only, waiting for the native API to detach its viewers. */
+  async closeSessionViews(): Promise<void> {
+    this.closingViews++;
+    try {
+      const viewers = [...this.sessionViews.values()].flatMap(retention => [...retention.viewers]);
+      for (const viewer of viewers) viewer.controller.abort();
+      await Promise.all(viewers.map(viewer => viewer.released));
+    } finally {
+      this.closingViews--;
+    }
+  }
+
+  /** Dispose a record's session, or defer the sweep until its last viewer detaches. */
+  private removeRecord(id: string, record: AgentRecord, boundary = false, skipUnconsumed = true): void {
+    if (this.agents.get(id) !== record) return;
+    const retention = this.sessionViews.get(record);
+    if (retention) {
+      if (!retention.removal || boundary) retention.removal = { boundary, skipUnconsumed };
+      return;
+    }
+    if (!boundary) this.tombstone(record);
     const session = record.session;
     // Detached before the shutdown starts, so the record leaves the map at once and
     // nothing can observe a session that is half torn down.
@@ -1642,7 +1738,7 @@ export class AgentManager {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       if (this.inFlight.has(id) || (skipUnconsumed && !record.resultConsumed)) continue;
-      this.removeRecord(id, record);
+      this.removeRecord(id, record, true, skipUnconsumed);
     }
     // Unconditional: both callers are session boundaries (`session_start` and
     // `session_before_switch`), and `skipUnconsumed` only spares records whose
@@ -1718,7 +1814,11 @@ export class AgentManager {
     // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
     // rather than left awaiting a gate nothing will ever resolve.
     this.dequeue(() => true);
+    // A view's promise settles only after core has detached its renderer and
+    // subscriptions. Aborting presentation alone is not proof it has detached.
+    if (this.hasSessionViews()) await this.closeSessionViews();
     const sessions = [...this.agents.values()].map(record => record.session);
+    for (const record of this.agents.values()) record.session = undefined;
     this.agents.clear();
     this.startups.clear();
     if (pi) {

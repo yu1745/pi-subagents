@@ -58,8 +58,10 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
+import { installNativeSessionViewPatch } from "./ui/native-pi-1.0.0/index.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
+import { openAgentSessionView } from "./ui/session-view.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
@@ -305,6 +307,10 @@ export default function (pi: ExtensionAPI) {
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
 
+  // Factory time precedes InteractiveMode's native UI context creation.
+  // A failed/version-mismatched patch disables viewing, never agent execution.
+  let nativeViewPatch: ReturnType<typeof installNativeSessionViewPatch> | undefined = installNativeSessionViewPatch();
+
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
     "subagent-notification",
@@ -425,24 +431,10 @@ export default function (pi: ExtensionAPI) {
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
   function setShowModel(b: boolean): void { showModel = b; widget.update(); }
-  /**
-   * How much of the conversation viewer renders as Markdown. Read through a
-   * getter by the viewer rather than captured like `showCost`, because the
-   * viewer's `m` key writes back here while the overlay is on screen.
-   */
+  /** Legacy viewer preference retained on disk; native viewing uses core settings. */
   let viewerMarkdown: ViewerMarkdownMode = "assistant";
   function getViewerMarkdown(): ViewerMarkdownMode { return viewerMarkdown; }
   function setViewerMarkdown(mode: ViewerMarkdownMode): void { viewerMarkdown = mode; }
-  /**
-   * The viewer's `m` key, from either entry point: set the mode and persist it,
-   * so the key and `/agents → Settings` stay one setting rather than one per
-   * entry point. `ctx` carries only the warning a failed write notifies with,
-   * and the fleet list may be acting without one.
-   */
-  function chooseViewerMarkdown(mode: ViewerMarkdownMode, ctx?: ExtensionCommandContext): void {
-    setViewerMarkdown(mode);
-    persistSettings(ctx, `Viewer markdown set to ${mode}`);
-  }
   const pendingUsage = new PendingUsagePool();
 
   // ---- Cancellable pending notifications ----
@@ -764,6 +756,8 @@ export default function (pi: ExtensionAPI) {
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
+  // Async menu/view completions must not reopen UI in a different session.
+  let uiGeneration = 0;
   // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
   // (a bound lifecycle event), not at factory time. pi runs every extension
   // factory before the `extensions:` filter and only fires lifecycle events for
@@ -819,6 +813,12 @@ export default function (pi: ExtensionAPI) {
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
+    nativeViewPatch ??= installNativeSessionViewPatch();
+    uiGeneration++;
+    if (manager.hasSessionViews()) {
+      fleet.dispose();
+      await manager.closeSessionViews();
+    }
     currentCtx = ctx;
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
@@ -1074,15 +1074,20 @@ export default function (pi: ExtensionAPI) {
     return { action: "handled" };
   });
 
-  pi.on("session_before_switch", () => {
+  pi.on("session_before_switch", async () => {
+    uiGeneration++;
+    currentCtx = undefined;
     manager.clearCompleted(true);
     scheduler.stop();
     supervision.dispose();
+    fleet.dispose();
+    await manager.closeSessionViews();
   });
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
+    uiGeneration++;
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -1108,7 +1113,12 @@ export default function (pi: ExtensionAPI) {
     // extensions bound there can release what they armed in `session_start` (#242).
     // pi awaits this handler, and the process exits right after — unawaited, those
     // handlers would never run. Internally bounded, so a hung one can't strand quit.
-    await manager.dispose(pi);
+    try {
+      await manager.dispose(pi);
+    } finally {
+      nativeViewPatch?.dispose();
+      nativeViewPatch = undefined;
+    }
   });
 
   // Live widget: show running agents above editor.
@@ -1122,10 +1132,7 @@ export default function (pi: ExtensionAPI) {
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  // The last two arguments keep a conversation overlay opened here identical to
-  // one opened from `/agents`: same setting on the way in, same persist out.
-  const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
-    (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined));
+  const fleet = new FleetList(manager, isShowCostEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -3106,7 +3113,8 @@ Terse command-style prompts produce shallow, generic work.
     return `${label} (→ ${resolvedFull.replace(/-\d{8}$/, "")})`;
   }
 
-  async function showAgentsMenu(ctx: ExtensionCommandContext) {
+  async function showAgentsMenu(ctx: ExtensionCommandContext, generation = uiGeneration) {
+    if (generation !== uiGeneration) return;
     reloadCustomAgents();
     const allNames = getAllTypes();
 
@@ -3153,11 +3161,11 @@ Terse command-style prompts produce shallow, generic work.
     }
 
     const choice = await ctx.ui.select("Agents", options);
-    if (!choice) return;
+    if (!choice || generation !== uiGeneration) return;
 
     if (choice.startsWith("Running agents (")) {
       await showRunningAgents(ctx);
-      await showAgentsMenu(ctx);
+      await showAgentsMenu(ctx, generation);
     } else if (choice.startsWith("Agent types (")) {
       await showAllAgentsList(ctx);
       await showAgentsMenu(ctx);
@@ -3166,7 +3174,7 @@ Terse command-style prompts produce shallow, generic work.
       await showAgentsMenu(ctx);
     } else if (choice.startsWith("Workflows (")) {
       await showWorkflowsMenu(ctx, workflowMenuDeps);
-      await showAgentsMenu(ctx);
+      await showAgentsMenu(ctx, generation);
     } else if (choice === "Create new agent") {
       await showCreateWizard(ctx);
     } else if (choice === "Settings") {
@@ -3244,6 +3252,7 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showRunningAgents(ctx: ExtensionCommandContext) {
+    const generation = uiGeneration;
     const agents = manager.listAgents().filter(isTopLevelAgent);
     if (agents.length === 0) {
       ctx.ui.notify("No agents.", "info");
@@ -3258,36 +3267,23 @@ Terse command-style prompts produce shallow, generic work.
       const dur = formatDuration(a.startedAt, a.completedAt);
       return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
-    if (!record) return;
+    if (!record || generation !== uiGeneration) return;
 
     await viewAgentConversation(ctx, record);
-    // Back-navigation: re-show the list
-    await showRunningAgents(ctx);
+    // Back-navigation, unless this view was closed by a session boundary.
+    if (generation === uiGeneration) await showRunningAgents(ctx);
   }
 
   async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
-    if (!record.session) {
-      ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
-      return;
+    const generation = uiGeneration;
+    const view = openAgentSessionView(manager, ctx.ui, record);
+    try {
+      await view?.closed;
+    } catch (error) {
+      if (generation === uiGeneration) {
+        ctx.ui.notify(`Could not open the conversation: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
     }
-
-    const { ConversationViewer, VIEWPORT_HEIGHT_PCT } = await import("./ui/conversation-viewer.js");
-    const session = record.session;
-    const activity = agentActivity.get(record.id);
-
-    await ctx.ui.custom<undefined>(
-      (tui, theme, keybindings, done) => {
-        return new ConversationViewer(tui, session, record, activity, theme, done, () => {
-          if (manager.abort(record.id)) {
-            ctx.ui.notify(`Stopped "${record.description}".`, "info");
-          }
-        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx));
-      },
-      {
-        overlay: true,
-        overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
-      },
-    );
   }
 
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
@@ -3846,7 +3842,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           id: "showModel",
           label: "Show model",
           description:
-            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The Agent tool result and the conversation viewer show the pair either way — this adds it to the widget, where the row is already dense.",
+            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The Agent tool result shows the pair either way — this adds it to the widget, where the row is already dense.",
           currentValue: isShowModelEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
@@ -3854,7 +3850,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           id: "viewerMarkdown",
           label: "Viewer markdown",
           description:
-            "How much of the conversation viewer renders as Markdown. assistant = assistant text only (default); all = tool results too, for tools that emit Markdown — accepting that a Markdown pass over a diff or a log eats `#` comments, swallows a `---` line and re-fences indented output; off = everything verbatim. `m` in the viewer cycles the same setting (footer: raw / md / md+).",
+            "Legacy overlay preference, retained for a separate settings migration. Native readonly child views use Pi core's rendering settings; this value does not affect them.",
           currentValue: getViewerMarkdown(),
           values: ["off", "assistant", "all"],
         },
@@ -4144,27 +4140,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
   // the right toast. Successful saves show info; persistence failures downgrade
   // to warning so users aren't silently reverted on restart. Event fires regardless
   // of outcome so listeners see the in-memory change.
-  /**
-   * Persist + broadcast the settings, silent on success — for a change whose
-   * feedback is the UI it just changed: the viewer's `m` key, where a
-   * notification per press would talk over the overlay it is describing.
-   *
-   * A *failed* write still speaks. Every other settings path warns when the
-   * value is session-only, and swallowing it here would leave a preference
-   * looking persisted when the next session will not have it.
-   */
-  function persistSettings(ctx: ExtensionCommandContext | undefined, changeMsg: string): void {
-    const { message, level } = saveAndEmitChanged(
-      snapshotSettings(),
-      changeMsg,
-      (event, payload) => pi.events.emit(event, payload),
-    );
-    // `ctx` is absent only on the fleet path between sessions, where
-    // `currentCtx` has been cleared and there is no UI to carry the warning to.
-    // The write still happens.
-    if (level === "warning") ctx?.ui.notify(message, level);
-  }
-
   function notifyApplied(ctx: ExtensionCommandContext, successMsg: string) {
     const { message, level } = saveAndEmitChanged(
       snapshotSettings(),

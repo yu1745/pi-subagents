@@ -3,7 +3,7 @@
  *
  * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
  * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ● marker),
- * Enter opens the selected agent's live conversation overlay, Esc returns to the prompt.
+ * Enter opens the selected agent's native readonly conversation, Esc returns to the prompt.
  * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
@@ -14,10 +14,10 @@
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
-import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
+import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
-import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { formatCost, type Theme } from "./agent-widget.js";
+import { openAgentSessionView, type SessionViewUI } from "./session-view.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -29,7 +29,7 @@ const TICK_MS = 200;
 const FINISHED_LINGER_MS = 4000;
 
 /** Minimal UI surface the FleetView needs from `ctx.ui` (structural subset). */
-export type FleetUICtx = {
+export type FleetUICtx = SessionViewUI & {
   setWidget(
     key: string,
     content: undefined | ((tui: any, theme: Theme) => { render(width: number): string[]; invalidate(): void; dispose?(): void }),
@@ -37,11 +37,6 @@ export type FleetUICtx = {
   ): void;
   onTerminalInput(handler: (data: string) => { consume?: boolean; data?: string } | undefined): () => void;
   getEditorText(): string;
-  notify(message: string, type?: "info" | "warning" | "error"): void;
-  custom<T>(
-    factory: (tui: any, theme: Theme, keybindings: any, done: (result: T) => void) => { render(width: number): string[]; invalidate(): void; dispose?(): void },
-    options?: { overlay?: boolean; overlayOptions?: unknown; onHandle?: (handle: unknown) => void },
-  ): Promise<T>;
 };
 
 /**
@@ -108,8 +103,9 @@ export class FleetList {
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
-  /** Set while a conversation overlay is open; calling it closes the overlay. */
+  /** Set while a native view is open; aborts presentation, not execution. */
   private viewerClose: (() => void) | undefined;
+  private viewerToken: symbol | undefined;
   private viewingAgentId: string | undefined;
   /** Injected by the extension; absent until workflows are wired (or at all). */
   private workflowSource: (() => readonly FleetWorkflow[]) | undefined;
@@ -125,25 +121,12 @@ export class FleetList {
 
   constructor(
     private manager: AgentManager,
-    private agentActivity: Map<string, AgentActivity>,
     /**
      * Read live at render time. Whether each row shows an estimated cost after
      * its token count. Defaults to off — the extension supplies the user's
      * `showCost` setting.
      */
     private showCost: () => boolean = () => false,
-    /**
-     * The user's `viewerMarkdown` setting, for a conversation overlay opened
-     * from here. Read live rather than captured, because the viewer's `m` key
-     * changes it while the overlay is up. Omitted → the viewer's own default.
-     */
-    private viewerMarkdown?: () => ViewerMarkdownMode,
-    /**
-     * Persist a mode chosen with `m` in that overlay, so the key means the same
-     * thing here as it does from `/agents` — one setting, not one per entry
-     * point. Omitted → `m` still cycles, viewer-locally.
-     */
-    private onViewerMarkdown?: (mode: ViewerMarkdownMode) => void,
   ) {}
 
   // ---- Lifecycle ----
@@ -182,6 +165,7 @@ export class FleetList {
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.inputUnsub?.();
     this.inputUnsub = undefined;
+    this.viewerToken = undefined;
     if (this.viewerClose) { this.viewerClose(); this.viewerClose = undefined; }
     this.viewingAgentId = undefined;
     // No handle to close the workflow inspector with, but the list is going
@@ -314,7 +298,7 @@ export class FleetList {
     // While an overlay is open, let it own all input. Checked before the focus
     // test below, which would otherwise read the dialog holding the keyboard as
     // "the user left the list" and reset the selection out from under it.
-    if (this.viewerClose || this.viewingWorkflowId) return undefined;
+    if (this.viewerClose || this.viewingWorkflowId || this.manager.hasSessionViews()) return undefined;
     // Input listeners fire BEFORE the focused component, and dialogs
     // (ctx.ui.select/confirm/input, pi's own menus) swap the prompt editor out
     // while getEditorText() still reads the detached — empty — editor. So when
@@ -391,51 +375,36 @@ export class FleetList {
       // `viewerClose` to hold — but the list still has to know one is up, and
       // still has to put the cursor back on the run when it comes down.
       this.viewingWorkflowId = entry.workflow.id;
-      void Promise.resolve(this.openWorkflow?.(entry.workflow.id)).then(
-        () => this.clearViewer(),
-        () => this.clearViewer(),
+      const token = Symbol();
+      this.viewerToken = token;
+      void (async () => this.openWorkflow?.(entry.workflow.id))().then(
+        () => this.clearViewer(token),
+        () => this.clearViewer(token),
       );
       return;
     }
     const record = entry.record;
     if (!this.ui) return;
-    if (!record.session) {
-      this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
-      return;
-    }
-    const session = record.session;
-    const activity = this.agentActivity.get(record.id);
+    const view = openAgentSessionView(this.manager, this.ui, record);
+    if (!view) return;
+    const token = Symbol();
+    this.viewerToken = token;
     this.viewingAgentId = record.id;
-
-    void this.ui.custom<undefined>(
-      (tui, theme, keybindings, done) => {
-        this.viewerClose = () => done(undefined);
-        return new ConversationViewer(
-          tui,
-          session,
-          record,
-          activity,
-          theme,
-          done,
-          () => {
-            if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
-          },
-          keybindings,
-          (message: string) => this.manager.steer(record.id, message),
-          this.showCost(),
-          this.viewerMarkdown,
-          this.onViewerMarkdown,
-        );
+    this.viewerClose = view.close;
+    void view.closed.then(
+      () => this.clearViewer(token),
+      error => {
+        if (this.viewerToken !== token) return;
+        this.ui?.notify(`Could not open the conversation: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        this.clearViewer(token);
       },
-      {
-        overlay: true,
-        overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
-      },
-    ).then(() => this.clearViewer(), () => this.clearViewer());
+    );
   }
 
   /** Reset overlay state and return to the list (on close, auto-close, or error). */
-  private clearViewer(): void {
+  private clearViewer(token: symbol): void {
+    if (this.viewerToken !== token) return;
+    this.viewerToken = undefined;
     // Keep the cursor on the agent we were viewing — re-resolve by id so it
     // still feels natural if the list reordered (an earlier agent finished)
     // while the overlay was open. If that agent is gone, leave the index for

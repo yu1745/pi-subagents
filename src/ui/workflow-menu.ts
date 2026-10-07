@@ -29,7 +29,7 @@ export interface WorkflowMenuDeps {
   tasks: ReadonlyMap<string, WorkflowTask>;
   /** The record behind an agent id, or undefined once it has been swept. */
   getRecord(id: string): AgentRecord | undefined;
-  /** The conversation overlay `c` opens on an agent row. */
+  /** The native readonly conversation `c` opens on an agent row. */
   viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord): Promise<void>;
   /**
    * The session context, for the fleet-list entry point — that one is a
@@ -54,20 +54,17 @@ export async function showWorkflowDialog(
   task: WorkflowTask,
   deps: WorkflowMenuDeps,
 ): Promise<void> {
-  // Overlaid on the same terms as the conversation viewer, because they are
-  // reached the same way: both are rows of the fleet list, and opening one
-  // must not behave unlike opening the other. Inline, the frame would render
-  // into the conversation and stay in the scrollback after it closed.
+  // The inspector keeps its existing overlay; only child conversations use
+  // native fullscreen viewing. Inline, this frame would stay in scrollback.
   const { VIEWPORT_HEIGHT_PCT } = await import("./conversation-viewer.js");
   /**
    * This dialog's own overlay, so `c` can hide it while the conversation is
-   * up. Overlays stack, so the viewer would render *over* it either way —
-   * but the two frames size themselves to different content, and the taller
-   * one's edges show around the shorter. Hidden, there is nothing to peek
-   * out, and un-hiding puts the focus back on the dialog when the viewer
-   * closes.
+   * up. Un-hiding restores the inspector after native fullscreen viewing,
+   * provided this inspector is still open.
    */
   let overlay: { setHidden(hidden: boolean): void } | undefined;
+  let active = true;
+  let viewing: symbol | undefined;
   await ctx.ui.custom<undefined>(
     (tui, theme, _keybindings, done) =>
       new WorkflowDialog(
@@ -117,6 +114,7 @@ export async function showWorkflowDialog(
             }
           },
           onOpenAgent: recordId => {
+            if (!active || viewing) return;
             const record = deps.getRecord(recordId);
             // A run's children are records like any other, so they are swept
             // ten minutes after they finish — the row outlives the
@@ -126,6 +124,8 @@ export async function showWorkflowDialog(
               ctx.ui.notify("No conversation left — agent records are dropped ten minutes after they finish.", "info");
               return;
             }
+            const token = Symbol();
+            viewing = token;
             overlay?.setHidden(true);
             // Caught before the `finally`, so a viewer that fails to open
             // still un-hides the dialog and cannot surface as an unhandled
@@ -135,7 +135,11 @@ export async function showWorkflowDialog(
                 `Could not open the conversation: ${err instanceof Error ? err.message : String(err)}`,
                 "warning",
               ))
-              .finally(() => overlay?.setHidden(false));
+              .finally(() => {
+                if (!active || viewing !== token) return;
+                viewing = undefined;
+                overlay?.setHidden(false);
+              });
           },
         },
       ),
@@ -144,7 +148,11 @@ export async function showWorkflowDialog(
       overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
       onHandle: handle => { overlay = handle; },
     },
-  );
+  ).finally(() => {
+    active = false;
+    viewing = undefined;
+    overlay = undefined;
+  });
 }
 
 /**

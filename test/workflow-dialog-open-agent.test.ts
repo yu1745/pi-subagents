@@ -4,15 +4,20 @@
  * `workflow-dialog.test.ts` proves the key raises the action and the footer
  * advertises it; this proves the half only the real extension can: that a
  * child's manager record id actually reaches the row (runtime → host →
- * progress entry), that `c` opens THAT record's conversation as a second
- * overlay, and that the dialog hides itself underneath rather than leaving its
- * frame peeking around the viewer.
+ * progress entry), that `c` opens THAT record's native readonly conversation,
+ * and that the dialog hides itself until the native view closes.
  *
  * Without the id on the row there is nothing to open, so the run's agents were
  * the one part of the fleet with no way to read what they did.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// These synthetic sessions test inspector routing, not Pi's private tracker
+// internals. Explicitly model successful tracking; production guards stay real.
+vi.mock("../src/ui/native-pi-1.0.0/session-snapshot.js", () => ({
+  installSessionViewTracking: vi.fn(() => true),
+}));
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -22,6 +27,7 @@ vi.mock("../src/agent-runner.js", async () => {
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { ctx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
+import { flushViews, nativeViewer } from "./helpers/session-view.js";
 
 /** Enough of a pi session for the manager to keep, and the viewer to render. */
 const fakeSession = () => ({
@@ -49,10 +55,12 @@ interface OpenOverlay {
 function overlayCtx() {
   const overlays: OpenOverlay[] = [];
   const hidden: boolean[] = [];
+  const native = nativeViewer();
   let entryTaken = false;
   const context = ctx({
     ui: {
       notify: vi.fn(),
+      viewSession: native.viewSession,
       select: vi.fn(async (title: string, options: string[]) => {
         if (title !== "Agents" || entryTaken) return undefined;
         entryTaken = true;
@@ -71,7 +79,7 @@ function overlayCtx() {
       }),
     },
   });
-  return { context, overlays, hidden };
+  return { context, overlays, hidden, native };
 }
 
 describe("the inspector opens a workflow agent's conversation", () => {
@@ -111,7 +119,7 @@ describe("the inspector opens a workflow agent's conversation", () => {
   }
 
   it("carries the child's record id onto the row and opens its conversation on c", async () => {
-    const { command } = await bootWithChild();
+    const { command, lifecycle } = await bootWithChild();
     const ui = overlayCtx();
 
     // Not awaited: the dialog overlay stays open, which is the point.
@@ -125,21 +133,57 @@ describe("the inspector opens a workflow agent's conversation", () => {
     await vi.waitFor(() => expect(dialog.render?.(120).at(-1)).toContain("c convo"));
 
     dialog.handleInput?.("c");
-    await vi.waitFor(() => expect(ui.overlays).toHaveLength(2));
-
-    // A second overlay, on the viewer's own terms — not the dialog reused.
-    expect(ui.overlays[1].options.overlay).toBe(true);
-    expect(ui.overlays[1].instance.constructor.name).toBe("ConversationViewer");
-    // ...with the dialog hidden underneath it: the two frames size themselves
-    // to different content, so the taller one's edges would show around the
-    // shorter.
+    await vi.waitFor(() => expect(ui.native.views).toHaveLength(1));
+    expect(ui.overlays).toHaveLength(1); // no mutable ConversationViewer
+    const child = vi.mocked(runAgent).mock.results[0];
+    const result = await child.value;
+    expect(ui.native.views[0].session).toBe(result.session);
+    expect(ui.native.views[0].options).toEqual({ title: expect.any(String), signal: expect.any(AbortSignal) });
     expect(ui.hidden).toEqual([true]);
 
-    ui.overlays[1].close();
+    ui.native.views[0].close();
     // And back, so closing the conversation returns to the run it was opened
     // from rather than to an empty screen.
     await vi.waitFor(() => expect(ui.hidden).toEqual([true, false]));
 
     ui.overlays[0].close();
+    await lifecycle.get("session_shutdown")({}, ui.context);
+  });
+
+  it("restores the inspector when the runtime patch is unavailable, with no mutable fallback", async () => {
+    const { command, lifecycle } = await bootWithChild();
+    const ui = overlayCtx();
+    delete ui.context.ui.viewSession;
+    void command.handler("", ui.context);
+    await vi.waitFor(() => expect(ui.overlays).toHaveLength(1));
+    const dialog = ui.overlays[0].instance;
+    await vi.waitFor(() => expect(dialog.render?.(120).at(-1)).toContain("c convo"));
+    dialog.handleInput?.("c");
+    await flushViews();
+    expect(ui.context.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Pi 1.0.0 TUI runtime patch"), "warning");
+    expect(ui.hidden).toEqual([true, false]);
+    expect(ui.overlays).toHaveLength(1);
+    expect(ui.native.viewSession).not.toHaveBeenCalled();
+    ui.overlays[0].close();
+    await lifecycle.get("session_shutdown")({}, ui.context);
+  });
+
+  it("a late native close never unhides an inspector that already closed", async () => {
+    const { command, lifecycle } = await bootWithChild();
+    const ui = overlayCtx();
+    void command.handler("", ui.context);
+    await vi.waitFor(() => expect(ui.overlays).toHaveLength(1));
+    const dialog = ui.overlays[0].instance;
+    await vi.waitFor(() => expect(dialog.render?.(120).at(-1)).toContain("c convo"));
+    dialog.handleInput?.("c");
+    dialog.handleInput?.("c"); // a second key cannot start another child view
+    await flushViews();
+    expect(ui.native.views).toHaveLength(1);
+    ui.overlays[0].close();
+    await flushViews();
+    ui.native.views[0].close();
+    await flushViews();
+    expect(ui.hidden).toEqual([true]);
+    await lifecycle.get("session_shutdown")({}, ui.context);
   });
 });
