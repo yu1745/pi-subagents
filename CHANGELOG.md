@@ -7,13 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Breaking: requires pi 1.0.0 or newer.** Upgrade Pi before loading this fork.
+
 ### Added
 - **Top-level parent supervision adds bounded activity reads and opt-in periodic evidence watches.** `get_subagent_activity` begins with a recent snapshot that marks any omitted retained activity, then advances chronologically with session-bound cursors; error metadata, reset gaps, and every output boundary are explicit without consuming a result. `watch_subagent` fairly coalesces due watches while the parent is idle, preserves unsent evidence on deferral/send failure, wakes even for a silent child with last progress evidence, and switches an overdue incremental backlog to a latest snapshot with an explicit manual catch-up cursor rather than replaying stale logs. Its default interval is 240 seconds, while callers can choose 30–3600 seconds. It stops at terminal/session teardown and is unavailable in print/JSON modes. Nested children and workflow-owned agents remain outside this v1 surface. Supervision prompts now distinguish observation from intervention: the parent corrects direction, scope, or acceptance, while children self-heal recoverable detail mistakes.
 - **Activity evidence now has stable, session-bound drill-down IDs.** `get_subagent_activity_detail` pages one bounded public transcript message without consuming results or changing a watch cursor, and rejects another agent/session plus compacted or replaced messages rather than resolving to the wrong content. Summary tool arguments now carry practical 240-character excerpts; public tool calls behind leading thinking/image blocks are retained within the bounded scan, while an unscanned tail is explicitly marked truncated.
 
 ### Fixed
+- **Model-mode `@handle` starts preserve conversation context on Pi 1.0.** The clone seeds Pi's canonical session history and configures its system prompt at construction, preserving resolved compaction and branch summaries without assigning the read-only agent prompt.
 - **Persistent top-level agents resume by their original ID after Pi or Pod restart.** A parent-scoped, atomic resume registry retains IDs, handles, aliases and execution metadata beside the parent's session file. Reopen the same parent with `pi -c`/`pi -r`, then explicitly use `Agent(resume)` or `@handle`; both reopen the saved JSONL conversation without replaying interrupted work. Memory cleanup no longer changes identity or drops older names at a 100-agent cap. Missing/corrupt sessions, unavailable types and vanished working directories fail closed instead of silently spawning a replacement. Persistent volumes must retain parent/child sessions and execution/config paths; ephemeral sessions remain opt-out. Tests cover fresh extension instances and two separate OS processes using the real SDK and conversation history.
 - **The workflow stand-down now recognises a lowercase `workflow` tool** ([#283](https://github.com/tintinweb/pi-subagents/issues/283) — thanks [@zampierilucas](https://github.com/zampierilucas)). The match is exact on purpose, and the set held `Workflow` and `SubagentWorkflow` only, so `@quintinshaw/pi-dynamic-workflows` — which registers lowercase `workflow` — never tripped it: with `workflowsEnabled` unset, both orchestrators reached the model and nothing warned. Adding the third name is the whole fix; exactness is kept, so a `list_workflows` still cannot take the feature down.
+
+### Changed
+- **The minimum Pi version is now 1.0.0.** Pi SDK development dependencies are pinned to 1.0.0. Host-provided `@sinclair/typebox` and `typebox` are declared as wildcard peers, with development copies for checks; runtime tests read prompts and tools from the message transcript.
 
 ## [0.19.0] - 2026-08-25
 

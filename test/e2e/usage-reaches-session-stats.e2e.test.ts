@@ -121,13 +121,19 @@ describe("subagent usage reaches the parent session's stats (real pi)", () => {
     // for no reason.
     const session = await realSession();
     try {
-      const before = session.getSessionStats().contextUsage?.percent ?? null;
-
-      const pool = new PendingUsagePool();
-      pool.add({ input: 150_000, output: 400, cacheWrite: 100, cost: 1.5 });
-      session.sessionManager.appendMessage(toolResultCarrying(pool.drain()) as any);
-
-      expect(session.getSessionStats().contextUsage?.percent ?? null).toBe(before);
+      const comparison = await realSession();
+      try {
+        comparison.sessionManager.appendMessage(toolResultCarrying(undefined) as any);
+        const pool = new PendingUsagePool();
+        pool.add({ input: 150_000, output: 400, cacheWrite: 100, cost: 1.5 });
+        session.sessionManager.appendMessage(toolResultCarrying(pool.drain()) as any);
+        // The result text itself occupies context; its reported child usage must not.
+        expect(session.getSessionStats().contextUsage?.percent ?? null).toBe(
+          comparison.getSessionStats().contextUsage?.percent ?? null,
+        );
+      } finally {
+        comparison.dispose?.();
+      }
     } finally {
       session.dispose?.();
     }

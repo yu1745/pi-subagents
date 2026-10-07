@@ -45,7 +45,7 @@ const CONVERSATION = [
 beforeEach(() => {
   createAgentSession.mockReset();
   inMemory.mockReset();
-  inMemory.mockReturnValue({ kind: "in-memory-session-manager" } as any);
+  inMemory.mockReturnValue({ kind: "in-memory-session-manager", appendMessage: vi.fn() } as any);
   buildSessionContext.mockReset();
   buildSessionContext.mockReturnValue({ messages: CONVERSATION, thinkingLevel: "high", model: null } as any);
 });
@@ -133,14 +133,27 @@ const opts = (over: Record<string, unknown> = {}) => ({
 describe("cloning the conversation", () => {
   it("carries the conversation's own messages, not a rendering of them", async () => {
     // The whole point: the copy reasons over what the main model can see.
-    const session = cloneSession(callsAgent());
+    cloneSession(callsAgent());
 
     await runMentionClone(opts());
 
-    expect(session.agent.state.messages).toEqual([
+    expect(inMemory.mock.results[0].value.appendMessage.mock.calls.map((call: any[]) => call[0])).toEqual([
       { role: "user", content: [{ type: "text", text: "hi" }] },
       { role: "assistant", content: [{ type: "text", text: "hello" }] },
     ]);
+  });
+
+  it("keeps compaction and branch summaries in the canonical clone history", async () => {
+    buildSessionContext.mockReturnValue({ messages: [
+      { role: "compactionSummary", summary: "COMPACTION_SEED", tokensBefore: 100, timestamp: 1 },
+      { role: "branchSummary", summary: "BRANCH_SEED", fromId: "source", timestamp: 2 },
+    ] });
+    cloneSession(callsAgent());
+    expect(await runMentionClone(opts())).toEqual({ spawned: true });
+    const messages = inMemory.mock.results[0].value.appendMessage.mock.calls.map((call: any[]) => call[0]);
+    expect(messages.map((message: any) => message.role)).toEqual(["user", "user"]);
+    expect(messages[0].content[0].text).toContain("COMPACTION_SEED");
+    expect(messages[1].content[0].text).toContain("BRANCH_SEED");
   });
 
   it("takes the conversation from memory, never from the session file", async () => {
@@ -155,6 +168,7 @@ describe("cloning the conversation", () => {
     expect(buildSessionContext).toHaveBeenCalledWith([{ type: "message" }], "leaf-1");
     expect(createAgentSession.mock.calls[0][0].sessionManager).toEqual({
       kind: "in-memory-session-manager",
+      appendMessage: expect.any(Function),
     });
   });
 
@@ -192,8 +206,8 @@ describe("cloning the conversation", () => {
     const result = await runMentionClone(o);
 
     expect(result).toEqual({ spawned: true });
-    expect(session.agent.state.messages).toEqual([]);
-    expect(session.agent.state.systemPrompt).toBe("the live system prompt");
+    expect(inMemory.mock.results[0].value.appendMessage.mock.calls.map((call: any[]) => call[0])).toEqual([]);
+    expect(session.createdWith.resourceLoader.getSystemPrompt()).toBe("the live system prompt");
   });
 
   it("carries the live system prompt rather than the one it rebuilt", async () => {
@@ -203,7 +217,7 @@ describe("cloning the conversation", () => {
 
     await runMentionClone(opts());
 
-    expect(session.agent.state.systemPrompt).toBe("the live system prompt");
+    expect(session.createdWith.resourceLoader.getSystemPrompt()).toBe("the live system prompt");
   });
 
   it("inherits the parent's model, thinking level and providers", async () => {
@@ -270,7 +284,7 @@ describe("attributing the spawn to the real session", () => {
     await runMentionClone(o);
 
     expect(tool.execute).toHaveBeenCalledTimes(1);
-    expect(tool.execute.mock.calls[0][4]).toBe(o.ctx);
+    expect(tool.execute.mock.calls[0][4]).toMatchObject(o.ctx);
   });
 
   it("passes no tool-call id, since the real session issued none", async () => {

@@ -53,6 +53,8 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type Model,
   type ToolCall,
 } from "@earendil-works/pi-ai";
@@ -328,8 +330,13 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
         throw new Error("runPrintMode (faux mode): provide `respond` or `steps`");
       }
       const max = options.maxModelCalls ?? 16;
-      const factory: FauxResponseStep = async (context, _opts, state) =>
-        toAssistantMessage(await respond(context, state));
+      const factory: FauxResponseStep = async (context, _opts, state) => {
+        return toAssistantMessage(await respond({
+          ...context,
+          tools: getCurrentTools(context.messages),
+          systemPrompt: getCurrentSystemPrompt(context.messages),
+        }, state));
+      };
       faux.setResponses(Array.from({ length: max }, () => factory));
     }
   }

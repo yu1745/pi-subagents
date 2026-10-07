@@ -50,7 +50,7 @@ Or load directly for development:
 pi -e ./src/index.ts
 ```
 
-Requires pi **0.84.0 or newer**: the [`SubagentWorkflow`](#subagentworkflow) tool builds on `constrainedSampling` (pi 0.82.0) and pi-tui's `stripTerminalSequences` (0.84.0). The `peerDependencies` range declares it, so npm flags an older pi at install time.
+Requires pi **1.0.0 or newer**. Conversation clones use Pi's canonical session history and configure the system prompt when the session is created. The `peerDependencies` range declares the minimum version, so npm flags an older pi at install time.
 
 ### Other hosts
 
