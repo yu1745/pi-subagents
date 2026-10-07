@@ -54,6 +54,7 @@ describe("AgentManager — record GC", () => {
     manager ??= new AgentManager();
     const id = manager.spawn(mockPi, mockCtx, "X", prompt, { description: prompt, isBackground: true });
     await manager.getRecord(id)!.promise;
+    manager.getRecord(id)!.resultConsumed = true;
     return { id, record: manager.getRecord(id)! };
   }
 
@@ -105,6 +106,19 @@ describe("AgentManager — record GC", () => {
     // After dispose() the runner is invalidated and every ctx getter throws, so an
     // emit that landed afterwards would be worse than none.
     expect(emit.mock.invocationCallOrder[0]).toBeLessThan(dispose.mock.invocationCallOrder[0]);
+  });
+
+  it.each(["completed", "stopped", "error"] as const)("retains unread %s results until consumed", async status => {
+    manager = new AgentManager();
+    const { id, record } = await settled("unread");
+    record.status = status;
+    record.resultConsumed = false;
+    record.completedAt = Date.now() - 10 * TEN_MINUTES;
+    await vi.advanceTimersByTimeAsync(TICK * 5);
+    expect(manager.getRecord(id)?.result).toBe("done");
+    record.resultConsumed = true;
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(manager.getRecord(id)).toBeUndefined();
   });
 
   it("never evicts a running agent, however old its timestamp looks", async () => {
@@ -178,6 +192,7 @@ describe("AgentManager — tombstones outliving the GC", () => {
     const id = manager.spawn(mockPi, mockCtx, type, prompt, { description: prompt, isBackground: true });
     const record = manager.getRecord(id)!;
     await record.promise;
+    record.resultConsumed = true;
     record.sessionFile = sessionFile;
     record.completedAt = Date.now() - (TEN_MINUTES + 30_000);
     return { id, record };

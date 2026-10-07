@@ -16,7 +16,6 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
@@ -451,9 +450,6 @@ export default function (pi: ExtensionAPI) {
   // before they reach pi.sendMessage (fire-and-forget).
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const NUDGE_HOLD_MS = 200;
-  // A queued result wait must observe completion before its held notification
-  // can fire, so successful waits can still suppress that redundant nudge.
-  const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
     cancelNudge(key);
@@ -483,7 +479,7 @@ export default function (pi: ExtensionAPI) {
       content: notification + footer,
       display: true,
       details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
-    }, { deliverAs: "followUp", triggerTurn: true });
+    }, { deliverAs: "steer", triggerTurn: true });
   }
 
   function sendIndividualNudge(record: AgentRecord) {
@@ -521,7 +517,7 @@ export default function (pi: ExtensionAPI) {
           content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
           display: true,
           details,
-        }, { deliverAs: "followUp", triggerTurn: true });
+        }, { deliverAs: "steer", triggerTurn: true });
       });
       widget.update();
     },
@@ -737,15 +733,12 @@ export default function (pi: ExtensionAPI) {
   /**
    * Resolve a tool's `agent_id` as an id OR a handle, so the model addresses
    * agents by the same names the user types. Ids are tried first, keeping the
-   * existing behaviour exact — a handle is only consulted when the string is
-   * not an id at all. Only live records: a tombstone has nothing to steer and
-   * no result to read. Callers still enforce the nested-ownership rejection.
+   * existing behaviour exact; unique ID prefixes (at least eight characters)
+   * are tried last. Only top-level live records: a tombstone has no result to
+   * read and owned children stay behind their ownership boundary.
    */
   const resolveAgentRef = (ref: string): AgentRecord | undefined => {
-    const byId = manager.getRecord(ref);
-    if (byId) return byId;
-    const resolved = manager.resolveMention(ref);
-    return resolved?.kind === "live" ? resolved.record : undefined;
+    return manager.resolveAgentRef(ref);
   };
 
   // Agent IDs can be reused by a resumed record, while an AgentSession has its
@@ -2424,7 +2417,7 @@ Terse command-style prompts produce shallow, generic work.
 
   /**
    * Hand a finished run back to the model through the SAME channel a background
-   * agent uses — held briefly by `scheduleNudge`, delivered as a follow-up that
+   * agent uses — held briefly by `scheduleNudge`, delivered as steering that
    * triggers a turn, rendered by the existing `subagent-notification` renderer.
    */
   function notifyWorkflowFinished(task: WorkflowTask) {
@@ -2448,7 +2441,7 @@ Terse command-style prompts produce shallow, generic work.
           error: task.error,
           resultPreview: result.length > 500 ? `${result.slice(0, 500)}…` : result,
         },
-      }, { deliverAs: "followUp", triggerTurn: true });
+      }, { deliverAs: "steer", triggerTurn: true });
     });
   }
 
@@ -2809,17 +2802,7 @@ Terse command-style prompts produce shallow, generic work.
       // Wait for completion if requested. Cancellation stops only this tool
       // call; the background agent keeps running and remains unconsumed so its
       // completion notification can still be delivered.
-      // Queued agents have no promise yet (it's created when the queue starts
-      // them), so poll until they leave the queue, then await like a running one.
-      if (params.wait && (record.status === "running" || record.status === "queued")) {
-        while (record.status === "queued") {
-          await abortable(
-            new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
-            signal,
-          );
-        }
-        if (record.promise) await abortable(record.promise, signal);
-      }
+      if (params.wait) await manager.waitForTerminal(record, signal);
 
       const displayName = getDisplayName(record.type);
       const duration = formatDuration(record.startedAt, record.completedAt);
@@ -2851,7 +2834,7 @@ Terse command-style prompts produce shallow, generic work.
       // Mark result as consumed — suppresses the completion notification
       if (record.status !== "running" && record.status !== "queued") {
         record.resultConsumed = true;
-        cancelNudge(params.agent_id);
+        cancelNudge(record.id);
       }
 
       // Verbose: include full conversation

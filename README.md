@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
 - **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `compacted`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
 - **Cross-extension RPC** — other pi extensions can spawn, stop, and join subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
-- **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same `subagent-notification` followUp path as manual background completions; manage via `/agents → Scheduled jobs`
+- **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same `subagent-notification` steering path as manual background completions; manage via `/agents → Scheduled jobs`
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
 
 ## Install
@@ -114,7 +114,7 @@ Schedule formats:
 - **One-shot relative** — `"+10m"`, `"+2h"`, `"+1d"`. Fires once at that future time.
 - **One-shot absolute** — full ISO timestamp, e.g. `"2026-12-25T09:00:00.000Z"`.
 
-When a schedule fires, the spawn runs in background and its completion notification arrives in the conversation through the same `subagent-notification` followUp path as a manually-spawned background agent — your parent agent reasons about the result the same way.
+When a schedule fires, the spawn runs in background and its completion notification arrives in the conversation through the same `subagent-notification` steering path as a manually-spawned background agent — your parent agent reasons about the result the same way.
 
 Schedules are **session-scoped**: they reset on `/new` and restore on `/resume`. List and cancel via `/agents → Scheduled jobs` (creation is the `Agent` tool's job — there is no parallel manual-create wizard). Storage at `<cwd>/.pi/subagent-schedules/<sessionId>.json` with PID-based file locking for cross-instance safety.
 
@@ -526,11 +526,15 @@ Check status and retrieve results from a background agent.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to check |
+| `agent_id` | string | yes | Agent ID, handle, or unique ID prefix (at least 8 characters) |
 | `wait` | boolean | no | Wait for completion |
 | `verbose` | boolean | no | Include full conversation log |
 
-Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
+Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally. Waiting covers queueing and asynchronous startup, including worktree creation. Unread terminal results are retained in memory until consumed rather than expired by timed cleanup.
+
+Result, steering, activity and watch tools accept exact IDs or handles first, then unique ID prefixes of at least eight characters; ambiguous prefixes fail explicitly. Nested result and steering lookups remain ownership-scoped.
+
+**Recovery limitation:** `get_subagent_result` reads current in-memory records only; it never starts or resumes an agent to retrieve output. The durable resume registry stores identity/execution metadata, not final results or errors, and optional `.output` transcripts do not record authoritative run outcomes. After restart or eviction of a consumed record, use already-delivered results or inspect saved transcripts; `Agent(resume)` is a new continuation, not read-only result recovery.
 
 ### `steer_subagent`
 
@@ -538,7 +542,7 @@ Send a steering message to a running agent. Direct user-requested steering is no
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to steer |
+| `agent_id` | string | yes | Agent ID, handle, or unique ID prefix (at least 8 characters) |
 | `message` | string | yes | Message to inject into agent conversation |
 
 ### `watch_subagent`
@@ -650,6 +654,8 @@ The foreground pool does not cover `resume`: a foreground resume reopens an exis
 Nested children and a [workflow](#subagentworkflow)'s agents are outside the pool entirely. A nested child would deadlock behind a parent waiting on it; a workflow already bounds its own fan-out at `max(1, min(16, cpus - 2))`, and counting its agents twice would let one run fill the session's pool and starve everything else.
 
 ## Join Strategies
+
+Background agent and tool-launched workflow completions use Pi's steering queue (`triggerTurn: true`): a busy parent receives them after its current assistant turn and tool calls, without waiting for the whole run to finish; an idle parent starts a turn. The 200ms notification hold, group aggregation, and suppression of foreground or already-consumed results remain unchanged. Opt-in Watch evidence still uses `followUp` and defers while the parent is busy.
 
 When background agents complete, they notify the main agent. The **join mode** controls how these notifications are delivered. It applies only to background agents.
 

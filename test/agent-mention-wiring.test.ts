@@ -1029,6 +1029,7 @@ describe("resuming an evicted agent by name", () => {
       cwd: process.cwd(),
       timestamp: new Date().toISOString(),
     })}\n`);
+    record.resultConsumed = true; // Only consumed results are eligible for timed GC.
     record.completedAt = Date.now() - 11 * 60_000;
     await vi.advanceTimersByTimeAsync(60_000);
     return manager;

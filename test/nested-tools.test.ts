@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentManager } from "../src/agent-manager.js";
 import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
@@ -10,6 +11,7 @@ import { encodeCwd } from "../src/output-file.js";
 
 let cwd: string;
 let manager: NestedAgentManager;
+let lifecycle: AgentManager;
 let records: Map<string, any>;
 let spawn: ReturnType<typeof vi.fn>;
 let spawnAndWait: ReturnType<typeof vi.fn>;
@@ -64,6 +66,8 @@ beforeEach(() => {
   writeAgent("reviewer");
   registerAgents(loadCustomAgents(cwd));
   records = new Map();
+  lifecycle = new AgentManager();
+  Reflect.set(lifecycle, "agents", records);
   spawn = vi.fn((_pi, _ctx, type, _prompt, options) => {
     const id = `child-${records.size + 1}`;
     records.set(id, { id, type, status: "running", parentAgentId: options.parentAgentId });
@@ -80,11 +84,14 @@ beforeEach(() => {
     spawnAndWait,
     awaitStartup: vi.fn(async () => {}),
     getRecord: (id: string) => records.get(id),
+    resolveAgentRef: lifecycle.resolveAgentRef.bind(lifecycle),
+    waitForTerminal: lifecycle.waitForTerminal.bind(lifecycle),
     resume: vi.fn(),
   } as any;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await lifecycle.dispose();
   setScopeModelsEnabled(false);
   rmSync(cwd, { recursive: true, force: true });
 });

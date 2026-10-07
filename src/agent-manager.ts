@@ -19,6 +19,7 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { abortable } from "./abortable.js";
 import { resolveEffectiveMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
@@ -1453,6 +1454,44 @@ export class AgentManager {
     return this.agents.get(id);
   }
 
+  /** Exact IDs and handles win; abbreviated IDs must be at least eight characters and unique. */
+  resolveAgentRef(ref: string, parentAgentId?: string): AgentRecord | undefined {
+    const eligible = (record: AgentRecord) => parentAgentId === undefined
+      ? isTopLevelAgent(record)
+      : record.parentAgentId === parentAgentId;
+    const exact = this.agents.get(ref);
+    if (exact) return eligible(exact) ? exact : undefined;
+    const records = [...this.agents.values()].filter(eligible);
+    const wanted = ref.toLowerCase();
+    const handle = records.find(record => record.handle?.toLowerCase() === wanted || record.alias?.toLowerCase() === wanted);
+    if (handle) return handle;
+    if (ref.length < 8) return undefined;
+    const matches = records.filter(record => record.id.startsWith(ref));
+    if (matches.length > 1) throw new Error(`Ambiguous agent ID prefix "${ref}". Use a full ID: ${matches.map(record => record.id).join(", ")}`);
+    return matches[0];
+  }
+
+  /** Wait through queueing and async startup; cancelling the wait never stops the child. */
+  async waitForTerminal(record: AgentRecord, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw signal.reason;
+    let awaitedRun: AgentRecord["promise"];
+    while (record.status === "queued" || record.status === "running" || this.inFlight.has(record.id)) {
+      if (record.status === "queued") {
+        await abortable(new Promise<void>(resolve => setTimeout(resolve, 50)), signal);
+        continue;
+      }
+      const startup = this.startups.get(record.id);
+      if (startup) await abortable(startup, signal);
+      if (record.promise && record.promise !== awaitedRun) {
+        awaitedRun = record.promise;
+        await abortable(record.promise, signal);
+      } else if (record.status === "running" || this.inFlight.has(record.id)) {
+        // Foreground resume may retain a prior run's already-settled promise.
+        await abortable(new Promise<void>(resolve => setTimeout(resolve, 50)), signal);
+      }
+    }
+  }
+
   /** Handles already in use, so a fresh spawn can pick an unclaimed one. */
   private takenHandles(): Set<string> {
     const taken = new Set<string>();
@@ -1588,7 +1627,7 @@ export class AgentManager {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
-      if (this.inFlight.has(id) || (record.completedAt ?? 0) >= cutoff) continue;
+      if (!record.resultConsumed || this.inFlight.has(id) || (record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
   }
@@ -1597,7 +1636,7 @@ export class AgentManager {
    * Remove all completed/stopped/errored records immediately.
    * Called on session start/switch so tasks from a prior session don't persist.
    * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
-   * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
+   * (resultConsumed=false) — timed cleanup preserves those records too.
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {

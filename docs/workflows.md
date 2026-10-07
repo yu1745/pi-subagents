@@ -31,7 +31,7 @@ You do not have to say "workflow" — the model picks the tool — but saying it
 
 ### 2. Read what came back
 
-The tool returns immediately. The run continues in the background and notifies you when it is done.
+The tool returns immediately. The run continues in the background and notifies you when it is done. After the 200ms notification hold, completion enters Pi's steering queue: a busy parent receives it after its current assistant turn and tool calls, rather than after the entire run; an idle parent starts a turn. CLI-flag runs still deliver next-turn context without forcing a turn.
 
 ```text
 Workflow "auth-audit" started in the background.
