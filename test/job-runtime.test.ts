@@ -52,6 +52,14 @@ describe("parent-owned Patty job runtime", () => {
     expect(jobRuntimeEnabled()).toBe(true);
   });
 
+  it.each([0, 10, 12000, 12001])("only advertises the full capture when %i output bytes exceed the preview", async size => {
+    const result = await main.execute("bash", { command: `printf '%s' '${"x".repeat(size)}'` }, "preview");
+    const job = ownJob("preview");
+    expect(readFileSync(job.logPath, "utf8")).toHaveLength(size);
+    expect(result.details).toEqual(size > 12000 ? { fullOutputPath: job.logPath } : undefined);
+    expect(textOf(result).includes("[truncated")).toBe(size > 12000);
+  });
+
   it("quick-window steer returns ID immediately, preserves the original signal and captures final output once", async () => {
     const child = await jobChild(runtime, cwd, "child-quick");
     const ac = new AbortController();

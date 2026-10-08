@@ -260,7 +260,11 @@ async function runForeground(args: {
         if (exit.signal === null && exit.code !== 0) {
             throw new Error(output || `Command exited with code ${exit.code ?? 1}`);
         }
-        return { content: [textBlock(output || "(no output)")], details: { fullOutputPath: logPath } };
+        // Pi renders fullOutputPath as a visible footer. Retain every capture,
+        // but advertise it only when the bounded preview actually omitted bytes.
+        let truncated = false;
+        try { truncated = statSync(logPath).size > OUTPUT_PREVIEW_CHARS; } catch { /* capture unavailable */ }
+        return { content: [textBlock(output || "(no output)")], details: truncated ? { fullOutputPath: logPath } : undefined };
     };
 
     // The quick window delays only presentation, never pause handling.
