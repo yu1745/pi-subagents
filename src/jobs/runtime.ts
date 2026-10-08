@@ -4,6 +4,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { registerCommands } from "./patty/commands.js";
 import { registerInputHandlers } from "./patty/input.js";
 import { detectNonInteractive, pauseAllForeground, terminateJobSilently } from "./patty/lifecycle.js";
+import { acquireLogLease } from "./patty/log-leases.js";
 import { renderSidebar, stopSidebarTicker } from "./patty/registry.js";
 import { registerShortcuts } from "./patty/shortcuts.js";
 import { BackgroundRegistry } from "./patty/state.js";
@@ -29,6 +30,9 @@ interface Owner {
   cwd?: string;
   registry: BackgroundRegistry;
   steers: string[];
+  context?: ExtensionContext;
+  deliverNotice?: ExtensionAPI["sendMessage"];
+  notices: Array<{ message: Parameters<ExtensionAPI["sendMessage"]>[0]; options: Parameters<ExtensionAPI["sendMessage"]>[1]; release?: () => void }>;
   draining: boolean;
   stopped: boolean;
   termination?: Promise<boolean>;
@@ -81,20 +85,30 @@ export class JobRuntime {
   constructor(private pi: ExtensionAPI) {
     this.registry.allJobs = this.storage;
     this.registry.retainResults = true;
-    this.registry.onChange = () => { for (const wake of [...this.changed]) wake(); };
+    this.registry.onChange = () => {
+      for (const wake of [...this.changed]) wake();
+      // A stale terminal context must never turn a job mutation into failure.
+      try { this.registry.taskUI?.refresh(); } catch { /* presentation only */ }
+    };
     this.root = this.makeOwner();
   }
 
   private makeOwner(agentId?: string): Owner {
     const registry = agentId === undefined ? this.registry : new BackgroundRegistry();
     if (agentId !== undefined) registry.shareLifetime(this.registry);
-    const owner: Owner = { agentId, registry, steers: [], draining: false, stopped: false };
+    const owner: Owner = { agentId, registry, steers: [], notices: [], draining: false, stopped: false };
     registry.jobs = new OwnedJobs(this.storage, owner, agentId === undefined);
     if (agentId !== undefined) {
       this.owners.set(agentId, owner);
       this.registry.ownerRegistries.set(agentId, registry);
     }
     return owner;
+  }
+
+  /** Bind the sole task navigation surface; does not alter tools or ownership. */
+  setTaskUI(ui: NonNullable<BackgroundRegistry["taskUI"]>): void {
+    this.registry.taskUI = ui;
+    for (const owner of this.owners.values()) owner.registry.taskUI = ui;
   }
 
   /** A manager run (including resume) may reuse the same SDK session. */
@@ -110,7 +124,7 @@ export class JobRuntime {
 
   installRoot(): void {
     this.registry.nonInteractive = detectNonInteractive(process.argv, !!process.stdin.isTTY);
-    this.registry.watchdog = createJobWatchdog(this.pi, this.registry);
+    this.registry.watchdog = this.createWatchdog();
     this.install(this.pi, this.root);
     registerCommands(this.pi, this.registry);
     registerShortcuts(this.pi, this.registry);
@@ -154,7 +168,7 @@ export class JobRuntime {
         if ([...this.storage.values()].some(job => job.status === "running")) throw new Error("Cannot restart job runtime while old jobs remain unconfirmed");
         this.registry.generation++;
         this.registry.disposed = false;
-        this.registry.watchdog = createJobWatchdog(this.pi, this.registry);
+        this.registry.watchdog = this.createWatchdog();
         for (const owner of this.owners.values()) owner.registry.watchdog = this.registry.watchdog;
       }
       this.ctx = ctx;
@@ -171,6 +185,19 @@ export class JobRuntime {
     return { name: JOB_RUNTIME_EXTENSION, factory: pi => this.install(pi, this.owner(agentId)) };
   }
 
+  private createWatchdog() {
+    // The shared sampler must not become a second parent-forwarding route.
+    const sendMessage: ExtensionAPI["sendMessage"] = (message, options) => {
+      const details = message.details as { jobId?: string } | undefined;
+      const job = details?.jobId ? this.storage.get(details.jobId) : undefined;
+      if (details?.jobId && !job) return;
+      const agentId = job?.ownerAgentId;
+      if (agentId) this.owners.get(agentId)?.deliverNotice?.(message, options);
+      else this.pi.sendMessage(message, options);
+    };
+    return createJobWatchdog(new Proxy(this.pi, { get: (target, key) => key === "sendMessage" ? sendMessage : Reflect.get(target, key) }), this.registry);
+  }
+
   private install(pi: ExtensionAPI, owner: Owner): void {
     const registerTool: ExtensionAPI["registerTool"] = tool => {
       pi.registerTool({
@@ -179,21 +206,27 @@ export class JobRuntime {
           // Stopped owners cannot start processes, but inspection/kill/cleanup
           // must remain available for an unconfirmed termination or retained log.
           if ((this.registry.disposed || owner.stopped) && tool.name !== "jobs") throw new Error("Job owner has stopped");
+          owner.context = ctx;
           owner.cwd = ctx.cwd;
           owner.sessionId = ctx.sessionManager.getSessionId();
           return tool.execute(id, params, signal, update, ctx);
         },
       });
     };
-    // Child notices always go to the parent. They never start a free-floating
-    // child prompt after runAgent's original promise has resolved.
+    // Deliver to the session that owns the job, never its parent. A streaming
+    // child handles steer delivery in its existing prompt. Idle child turns
+    // must instead be awaited by drain(), not launched as detached SDK work.
     const sendMessage: ExtensionAPI["sendMessage"] = (message, options) => {
-      this.pi.sendMessage({
-        ...message,
-        content: owner.agentId && typeof message.content === "string"
-          ? `[agent ${owner.agentId}]\n${message.content}` : message.content,
-      }, options);
+      if (owner.agentId && options?.triggerTurn && (owner.draining || owner.context?.isIdle()) && !owner.stopped) {
+        const details = message.details as { jobId?: string } | undefined;
+        const job = details?.jobId ? owner.registry.jobs.get(details.jobId) : undefined;
+        owner.notices.push({ message, options, release: job ? acquireLogLease(job) : undefined });
+        this.registry.onChange?.();
+      } else {
+        pi.sendMessage(message, owner.agentId && owner.stopped ? { ...options, triggerTurn: false } : options);
+      }
     };
+    owner.deliverNotice = sendMessage;
     const scopedPi = new Proxy(pi, { get: (target, key) => {
       if (key === "registerTool") return registerTool;
       if (key === "sendMessage") return sendMessage;
@@ -208,8 +241,13 @@ export class JobRuntime {
     if (!/^(1|true|yes)$/i.test(process.env.PI_PATTY_DISABLE_AGENT_BG ?? "")) registerAgentBgTool(scopedPi, reg);
     registerInputHandlers(scopedPi, reg);
     if (owner.agentId) pi.on("session_shutdown", async () => {
-      // Session GC is not job/log eviction. The parent owns the storage.
+      // Session GC is not job/log eviction. Do not retain the disposed SDK
+      // session through its context or notification callback.
       stopSidebarTicker(reg);
+      if (owner.deliverNotice === sendMessage) {
+        owner.context = undefined;
+        owner.deliverNotice = undefined;
+      }
     });
   }
 
@@ -244,19 +282,36 @@ export class JobRuntime {
         }
         const steer = owner.steers.shift();
         if (steer !== undefined) { await session.prompt(steer); continue; }
+        const notice = owner.notices.shift();
+        if (notice) {
+          try { await session.sendCustomMessage(notice.message, notice.options); }
+          finally { notice.release?.(); }
+          continue;
+        }
         if (!this.hasRunning(agentId)) return;
         await new Promise<void>(resolve => {
           const wake = () => { this.changed.delete(wake); resolve(); };
           this.changed.add(wake);
           // Registration and state check happen without an await: no missed
           // wake between observing a running job and arming the listener.
-          if (signal?.aborted || owner.stopped || owner.steers.length || !this.hasRunning(agentId)) wake();
+          if (signal?.aborted || owner.stopped || owner.steers.length || owner.notices.length || !this.hasRunning(agentId)) wake();
         });
       }
     } finally {
       owner.draining = false;
       clearInterval(keepAlive);
       signal?.removeEventListener("abort", wakeOnAbort);
+    }
+  }
+
+  private flushStoppedNotices(owner: Owner): void {
+    // Preserve accepted outcomes on provider errors/caps/shutdown as well as
+    // the normal drain path, but never start a detached or post-stop turn.
+    while (owner.notices.length) {
+      const notice = owner.notices[0];
+      owner.deliverNotice?.(notice.message, { ...notice.options, triggerTurn: false });
+      owner.notices.shift();
+      notice.release?.();
     }
   }
 
@@ -273,7 +328,7 @@ export class JobRuntime {
     owner.termination = Promise.all([...owner.registry.jobs.values()]
       .filter(job => job.status === "running")
       .map(job => terminateJobSilently(owner.registry, job)))
-      .then(stopped => stopped.every(Boolean));
+      .then(stopped => { this.flushStoppedNotices(owner); return stopped.every(Boolean); });
     void owner.termination.then(stopped => { if (!stopped) owner.termination = undefined; });
     return owner.termination;
   }
@@ -285,7 +340,10 @@ export class JobRuntime {
     const stopped = await Promise.all([...this.storage.values()]
       .filter(job => job.status === "running")
       .map(job => terminateJobSilently(this.registry, job)));
-    for (const owner of [this.root, ...this.owners.values()]) stopSidebarTicker(owner.registry);
+    for (const owner of [this.root, ...this.owners.values()]) {
+      stopSidebarTicker(owner.registry);
+      this.flushStoppedNotices(owner);
+    }
     if (this.ctx) renderSidebar(this.registry, this.ctx);
     return stopped.every(Boolean);
   }

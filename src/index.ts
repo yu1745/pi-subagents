@@ -1165,6 +1165,10 @@ export default function (pi: ExtensionAPI) {
     viewerMarkdown: getViewerMarkdown,
     onMarkdownMode: mode => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
   }));
+  if (jobRuntime) {
+    fleet.setJobSource(jobRuntime.registry, () => currentCtx?.sessionManager.getSessionId());
+    jobRuntime.setTaskUI({ refresh: () => fleet.update(), open: () => fleet.activate() });
+  }
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -3918,7 +3922,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "fleetView",
           label: "Fleet view",
-          description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
+          description: "Unified Agent and owned bash task tree below the editor (↓ to enter, ←→ fold, Enter details)",
           currentValue: isFleetViewEnabled() ? "on" : "off",
           values: ["on", "off"],
         },

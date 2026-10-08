@@ -24,17 +24,44 @@ One activation owns a shared job store. Each job records the owning agent, sessi
 | `jobs(action: "attach")` on a shell | Waits again; steer or cancellation detaches without killing the shell. |
 | Esc cancelling foreground `bash` | Terminates its supervised process group, escalating TERM to KILL. |
 | `jobs(action: "kill")` / Agent stop | Terminates the job / owned jobs and descendants. |
-| `jobs(action: "cleanup")` | Deletes only terminal jobs and their captures; never live work or active attach consumers. |
+| `jobs(action: "cleanup")` | Deletes only terminal jobs and their captures; never live work, active attach consumers, or currently viewed logs. |
 
 Only merged local shell waits and shell attach waits have the fast-release behavior. `read`, `write`, `edit`, arbitrary third-party tools, monitor attach, and unmerged builtin bash do **not** get globally interrupted or cancelled. Their steering stays queued. Passive extension follow-ups do not release waits. The foreground timeout defaults to 60 seconds and promotes the command to background rather than killing execution; explicit timeouts must be finite, positive and at most 86400 seconds.
 
 ## Lifecycle and output
 
-The original run/resume promise, event collectors, concurrency slot, and worktree remain alive while owned jobs run. Steering an idle session in this drain phase starts a continuation **inside that same promise**. Natural completion occurs only after jobs settle. Persistent monitors therefore keep their owner running until explicitly stopped. Abort, hard turn cap, provider failure, session switch and shutdown stop owned processes before cleanup; unconfirmed termination prevents releasing the worktree. Resume-turn accounting is separate from job ownership.
+The original run/resume promise, event collectors, concurrency slot, and worktree remain alive while owned jobs run. Steering an idle session in this drain phase starts a continuation **inside that same promise**. Natural completion occurs only after jobs settle and accepted owner notifications finish their managed continuations. Persistent monitors therefore keep their owner running until explicitly stopped. Abort, hard turn cap, provider failure, session switch and shutdown stop owned processes before cleanup; unconfirmed termination prevents releasing the worktree. Resume-turn accounting is separate from job ownership.
 
-Logs and terminal metadata remain available after agent completion and memory cleanup, until explicit job cleanup. `jobs output` returns a bounded tail; `jobs search` searches the retained capture, and the returned path allows reading the full shell log. Monitor output retains its existing bounded/rolling behavior: it is not an unlimited historical archive. Counters and terminal notifications are accounted once; attaching consumers suppress premature completion notices without losing a detached job's eventual notice.
+Logs and terminal metadata remain available after agent completion and memory cleanup, until explicit job cleanup. `jobs output` returns a bounded tail; `jobs search` searches the retained capture, and the returned path allows reading the full shell log. Monitor output retains its existing bounded/rolling behavior: it is not an unlimited historical archive. Counters and terminal notifications are accounted once; owner-session attaching consumers suppress premature completion notices without losing a detached job's eventual notice. Main's `jobs output`/`attach` access to child jobs is observation, not consumption of the child's notification.
 
 State is activation-memory, not a durable process registry. Conversation resume restores chat history, **not running processes**. Supervisor/process-group termination covers ordinary descendants, including TERM-resistant processes, but does not guarantee control over `setsid`/cgroup escapes, arbitrary host crashes, or cross-host restart. `agent_bg` remains an external `pi -p` subprocess, not a native SDK child with steering/resume semantics.
+
+## Owner-only job notifications
+
+A job's completion/failure is delivered only to its owning Agent/session, never copied to main. Main still receives its own jobs, whole-Agent completion, explicit watches/help, and the existing marked direct-user-steer parent relay. The task tree refreshes from state changes, not a main-model message.
+
+Streaming owners receive the notice inside their existing SDK prompt. Idle owners queue it for `drain()` to deliver and await within the original run/resume promise, preserving the worktree and captures until the owner's result handling finishes. Pending outcomes are recorded passively if a stop/cap forbids another model turn. Parent inspection cannot latch the owner's notice or suppress it via a foreign attach waiter.
+
+## Unified task navigation
+
+The integrated runtime uses one FleetView task tree below the editor. Main-session bash tasks are top-level rows under `main`; owned bash tasks nest under their visible Agent. Nested/workflow Agent visibility rules are unchanged: jobs do not create a back door into a hidden owner or another session. The tree itself does not change Agent/jobs tool APIs, execution, process ownership or steering; notification delivery follows the owner-only rule above.
+
+| Key | Action |
+| --- | --- |
+| Empty prompt `↓` | Enter the task tree (`/bg-list` is an alias, not another panel). |
+| `↑` / `↓` | Select a row. |
+| `←` / `→`, `Space` | Collapse / expand, or toggle a node/Completed group. |
+| `Enter` | Agent: existing native Pi conversation view; bash: dedicated readonly log viewer; group: toggle. |
+| `Esc` | Return to the tree or prompt, without stopping work. |
+| `x` | Ask to stop the selected Agent and its owned tasks/descendants, or only the selected bash process group. `Enter`/`y` confirms; `Esc`/`n` cancels. |
+| `d` | Confirm removal of a selected terminal bash task and its captures. Running tasks cannot be removed. |
+| `Ctrl+Alt+S` on Agent | Existing scoped steer composer and direct-parent forwarding. Never a bash command input. |
+
+The old `Shift+↓` and `Ctrl+Shift+J` background-manager shortcuts are removed. `Ctrl+Shift+B` still releases foreground waits; `Ctrl+Shift+X` now confirms the single job/process-group scope before stopping the most recent running job. Background pills no longer form a second UI. Turning Fleet view off hides task navigation too; APIs still work.
+
+Bash details occupy the full terminal viewport, anchored at the top with opaque blank padding and a fixed bottom status/search row and shortcut row, including after resize. Empty running logs explicitly wait for output; completed empty logs report no captured output. Bash details show combined shell stdout/stderr in real time. They follow the tail by default; `↑`/`PageUp` pauses following, and `End` resumes. Completion retains the same page with status, exit code and frozen duration. `/` starts a literal search and `n` continues it; search is bounded and cancellable. Reads and caches are bounded even for a giant single-line file. Missing/unreadable logs are reported explicitly. Monitor captures may be rolling and use separate stdout/stderr files; they are not an unlimited archive.
+
+Opening, searching, scrolling or closing logs never calls `jobs attach`, alters `job.notified`, adds an attach waiter, or consumes a completion notice/tool result. A separate read lease prevents explicit cleanup from removing captures while viewed; close the view and retry cleanup. Terminal logs remain reachable through Completed groups until explicit cleanup, including after their Agent's session is released. This is in-memory, same-activation history, not restart persistence.
 
 ## Direct user steering from child views
 

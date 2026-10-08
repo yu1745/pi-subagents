@@ -19,8 +19,9 @@ import {
     ensureCompletionPromise,
     terminateJobSilently,
 } from "../lifecycle.js";
+import { acquireLogLease } from "../log-leases.js";
 import { searchLogs } from "../log-search.js";
-import { markNotified } from "../notify.js";
+import { markNotified, ownsJobNotification } from "../notify.js";
 import { streamLog } from "../output.js";
 import {
     cleanupTerminal,
@@ -152,7 +153,7 @@ async function outputAction(
     // CC's TaskOutputTool: a successful read of a TERMINAL job's output marks
     // it notified, suppressing the separate <task-notification>. Peeking at a
     // still-running job does NOT mark — its completion must still notify.
-    if (isTerminalStatus(job.status)) markNotified(job);
+    if (isTerminalStatus(job.status) && ownsJobNotification(reg, job)) markNotified(job);
     const out = readLogTail(job, OUTPUT_PREVIEW_CHARS).trimEnd();
     const label = jobLabel(job);
     return {
@@ -208,6 +209,7 @@ async function attachAction(
     if (!job) throw new Error(`No task found with ID: ${jobId}`);
     const label = jobLabel(job);
     const generation = reg.generation;
+    const consumesOutcome = ownsJobNotification(reg, job);
 
     if (job.status === "running" && waitForCompletion) {
         ensureCompletionPromise(job);
@@ -226,7 +228,10 @@ async function attachAction(
         // A Promise alone does not keep a headless Node host alive. Only hold
         // this reference while an explicit attach is awaiting its result.
         const keepAlive = setInterval(() => {}, 1000);
-        job.waiters = (job.waiters ?? 0) + 1;
+        // A parent may observe an owned child job, but is not that child's
+        // outcome consumer. Protect its capture without suppressing delivery.
+        const releaseLog = consumesOutcome ? undefined : acquireLogLease(job);
+        if (consumesOutcome) job.waiters = (job.waiters ?? 0) + 1;
         let releaseWait!: () => void;
         const pause = new Promise<void>(resolve => { releaseWait = resolve; });
         // Steering may release only this runtime's bash waits, never monitor,
@@ -249,7 +254,8 @@ async function attachAction(
             clearInterval(keepAlive);
             poller.stop();
             reg.foreground.delete(toolCallId);
-            job.waiters = Math.max(0, (job.waiters ?? 1) - 1);
+            if (consumesOutcome) job.waiters = Math.max(0, (job.waiters ?? 1) - 1);
+            releaseLog?.();
             if (signal && onAbort) signal.removeEventListener("abort", onAbort);
         }
 
@@ -283,7 +289,7 @@ async function attachAction(
     // <task-notification> is suppressed (CC parity). Covers both the "attached
     // to an already-terminal job" and "waited then finished" cases; idempotent
     // with the running-branch set above.
-    markNotified(job);
+    if (consumesOutcome) markNotified(job);
     return {
         content: [textBlock(`${message}. Use jobs output for the full log.`)],
         details: undefined,

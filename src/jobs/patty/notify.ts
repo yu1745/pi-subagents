@@ -85,6 +85,11 @@ export function completionSummary(job: Job, status?: TerminalStatus): string {
  * paths (before the kill, so the exit handler skips notifying) and terminal
  * reads (jobs output / attach).
  */
+/** Root inspection is not consumption of another session's outcome. */
+export function ownsJobNotification(reg: BackgroundRegistry, job: Job): boolean {
+    return !job.ownerAgentId || reg.ownerRegistries.get(job.ownerAgentId) === reg;
+}
+
 export function markNotified(job: Job): void {
     job.notified = true;
 }

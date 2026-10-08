@@ -102,6 +102,7 @@ describe("fused jobs through the real SDK runner/manager lifecycle", () => {
       fauxAssistantMessage(fauxToolCall("bash", { command, run_in_background: runInBackground })),
       fauxAssistantMessage("model finished but owned shell is still alive"),
       fauxAssistantMessage("managed continuation finished"),
+      fauxAssistantMessage("managed continuation finished after owned job notice"),
     ]);
   }
   function spawn(worktree = true, cleanup?: () => void) {
@@ -151,10 +152,38 @@ describe("fused jobs through the real SDK runner/manager lifecycle", () => {
     expect(completed).toHaveBeenCalledTimes(1);
     const job = [...runtime.registry.jobs.values()].find(job => job.ownerAgentId === id)!;
     expect(textOf(await main.execute("jobs", { action: "output", jobId: job.id }))).toContain("SDK_FINAL");
-    expect(main.notices.filter(notice => notice.customType === "task-notification")).toHaveLength(1);
+    expect(main.notices.filter(notice => notice.customType === "task-notification")).toHaveLength(0);
+    expect(record.session!.messages.filter(message => message.role === "custom" && message.customType === "task-notification")).toHaveLength(1);
     const userTexts = record.session!.messages.filter(message => message.role === "user").map(message => JSON.stringify(message));
     expect(userTexts.join("\n")).toContain("  SDK user steer  ");
     expect(userTexts.join("\n")).toContain("idle continuation steer");
+  });
+
+  it.each([0, 7])("owned background exit %i is processed inside the original SDK run, not the main model", async exitCode => {
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("bash", { command: `sleep 0.25; echo OWNER_FINAL; exit ${exitCode}`, run_in_background: true })),
+      fauxAssistantMessage("waiting for owned result"),
+      fauxAssistantMessage("owned result recovered"),
+    ]);
+    const id = spawn();
+    await manager.awaitStartup(id);
+    const record = manager.getRecord(id)!;
+    const original = record.promise;
+    const tree = record.worktree!.path;
+    await until(() => !!record.session?.isIdle && runtime.hasRunning(id));
+    expect(existsSync(tree)).toBe(true);
+    expect(completed).not.toHaveBeenCalled();
+    await original;
+    expect(record.promise).toBe(original);
+    expect(record.status).toBe("completed");
+    expect(record.result).toContain("owned result recovered");
+    expect(faux.state.callCount).toBe(3);
+    expect(main.notices).toHaveLength(0);
+    const notices = record.session!.messages.filter(message => message.role === "custom" && message.customType === "task-notification");
+    expect(notices).toHaveLength(1);
+    expect(JSON.stringify(notices[0])).toContain(exitCode ? "failed" : "completed");
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(existsSync(tree)).toBe(false);
   });
 
   it.each([false, true])("hard cap during managed drain stops owned jobs and counts this invocation (resume=%s)", async (resume) => {
@@ -321,8 +350,8 @@ export default function(pi) {
       fauxAssistantMessage(fauxToolCall("parent_external", {})),
       fauxAssistantMessage(fauxToolCall("bash", { command: `printf yes > '${marker}'; while [ ! -e '${release}' ]; do sleep 0.05; done; echo UI_CAPTURE_FINAL` })),
       fauxAssistantMessage("child processed original UI text"),
+      fauxAssistantMessage("child acknowledged its owned job completion"),
       fauxAssistantMessage("parent processed forwarded user steer"),
-      fauxAssistantMessage("parent acknowledged one task completion"),
     ]);
     const parentPrompt = parent.prompt("run parent external tool");
     try {
@@ -355,6 +384,8 @@ export default function(pi) {
       expect(parentSignal?.aborted).toBe(false);
       const userMessages = parent.messages.filter(message => message.role === "user").map(message => JSON.stringify(message));
       expect(userMessages.filter(message => message.includes("[USER DIRECT SUBAGENT STEER]"))).toHaveLength(1);
+      expect(parent.messages.filter(message => message.role === "custom" && message.customType === "task-notification")).toHaveLength(0);
+      expect(record.session!.messages.filter(message => message.role === "custom" && message.customType === "task-notification")).toHaveLength(1);
     } finally {
       writeFileSync(release, "go");
       releaseParent();

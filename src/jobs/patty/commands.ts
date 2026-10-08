@@ -3,7 +3,7 @@
  * Slash command registration.
  *
  *   - /bg: same as Ctrl+Shift+B — background the foreground process
- *   - /bg-list: open the interactive background task manager
+ *   - /bg-list: enter the unified task tree
  *   - /bg-version: show the loaded extension version/path
  */
 
@@ -34,7 +34,7 @@ export function registerCommands(
     });
 
     pi.registerCommand("bg-list", {
-        description: "Open the interactive background task manager",
+        description: "Enter the unified Agent and bash task tree",
         handler: async (_args, ctx: ExtensionCommandContext) => {
             await openBgListPanel(reg, ctx);
         },

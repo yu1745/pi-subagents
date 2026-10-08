@@ -12,6 +12,7 @@ import { mkdtempSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { formatDuration, jobLabel } from "./format.js";
+import { hasLogReaders } from "./log-leases.js";
 import { readBoundedTail, readLastLine } from "./output.js";
 import type { BackgroundRegistry } from "./state.js";
 import {
@@ -158,7 +159,7 @@ export function forget(reg: BackgroundRegistry, job: Job): Job | undefined {
     reg.recentTerminal.push(job);
     if (reg.recentTerminal.length > RECENT_TERMINAL_KEEP) {
         const dropped = reg.recentTerminal.shift();
-        if (dropped) {
+        if (dropped && !hasLogReaders(dropped)) {
             deleteLogFile(dropped.logPath);
             deleteLogFile(dropped.logPath.replace(/\.log$/, ".err"));
         }
@@ -191,7 +192,7 @@ export function cleanupTerminal(reg: BackgroundRegistry): {
 
     const idsToRemove: string[] = [];
     for (const [id, job] of reg.jobs.entries()) {
-        if (isTerminalStatus(job.status) && !job.waiters) {
+        if (isTerminalStatus(job.status) && !job.waiters && !hasLogReaders(job)) {
             idsToRemove.push(id);
             bytes += deleteOnce(job.logPath);
             purged++;
@@ -201,16 +202,28 @@ export function cleanupTerminal(reg: BackgroundRegistry): {
         reg.jobs.delete(id);
     }
     // The recent-terminal ring is all terminal jobs too — sweep their logs.
-    for (const job of reg.recentTerminal) {
+    reg.recentTerminal = reg.recentTerminal.filter(job => {
+        if (hasLogReaders(job) || job.waiters) return true;
         bytes += deleteOnce(job.logPath);
         purged++;
-    }
-    reg.recentTerminal.length = 0;
+        return false;
+    });
+    reg.onChange?.();
     return { purged, bytesReclaimed: bytes };
+}
+
+/** UI removal uses the same scope and resource protection as tool cleanup. */
+export function cleanupJob(reg: BackgroundRegistry, job: Job): boolean {
+    if (reg.jobs.get(job.id) !== job || !isTerminalStatus(job.status) || job.waiters || hasLogReaders(job)) return false;
+    deleteJobLogs(job);
+    reg.jobs.delete(job.id);
+    reg.onChange?.();
+    return true;
 }
 
 /** Drop captures when their metadata leaves a disposed runtime. */
 export function deleteJobLogs(job: Job): number {
+    if (hasLogReaders(job)) return 0;
     return deleteLogFile(job.logPath) + deleteLogFile(job.logPath.replace(/\.log$/, ".err"));
 }
 
@@ -235,6 +248,11 @@ function deleteLogFile(logPath: string): number {
 export function renderSidebar(reg: BackgroundRegistry, ctx: UiContext): void {
     if (reg.disposed) { stopSidebarTicker(reg); return; }
     try {
+        if (reg.taskUI) {
+            stopSidebarTicker(reg);
+            reg.taskUI.refresh();
+            return;
+        }
         renderSidebarActive(reg, ctx);
     } catch {
         // UI contexts expire on reload/session replacement. State cleanup must

@@ -16,6 +16,8 @@ export class BackgroundRegistry {
     ownerRegistries = new Map<string, BackgroundRegistry>();
     retainResults = false;
     onChange: (() => void) | undefined;
+    /** Presentation only; never routes tools or changes owner capabilities. */
+    taskUI: { refresh(): void; open(): void } | undefined;
     watchdog: JobWatchdog | undefined;
     foreground = new Map<string, ForegroundSlot>();
 
@@ -40,6 +42,7 @@ export class BackgroundRegistry {
         this.watchdog = parent.watchdog;
         this.retainResults = parent.retainResults;
         this.onChange = parent.onChange;
+        this.taskUI = parent.taskUI;
     }
 
     completedCount = 0;

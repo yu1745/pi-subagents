@@ -11,13 +11,19 @@
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
  */
 
-import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, isKeyRelease, Key, matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
+import { terminateJobSilently } from "../jobs/patty/lifecycle.js";
+import { acquireLogLease } from "../jobs/patty/log-leases.js";
+import { cleanupJob } from "../jobs/patty/registry.js";
+import type { BackgroundRegistry } from "../jobs/patty/state.js";
+import { isTerminalStatus, type Job } from "../jobs/patty/types.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { FORCE_STEER_KEY } from "../user-steer.js";
 import { formatCost, type Theme } from "./agent-widget.js";
+import { openJobLogView } from "./job-log-view.js";
 import { type LegacyViewerOptions, openAgentSessionView, type SessionViewUI } from "./session-view.js";
 
 /** Widget key for the below-editor fleet list. */
@@ -63,7 +69,21 @@ export interface FleetWorkflow {
 type MainEntry = { kind: "main" };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
-type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
+type JobEntry = { kind: "job"; job: Job; depth: number };
+type GroupEntry = { kind: "group"; id: string; label: string; depth: number };
+type OwnerEntry = { kind: "owner"; id: string; description: string };
+type FleetEntry = MainEntry | WorkflowEntry | AgentEntry | JobEntry | GroupEntry | OwnerEntry;
+
+function entryKey(entry: FleetEntry): string {
+  return entry.kind === "agent" ? `agent:${entry.record.id}`
+    : entry.kind === "job" ? `job:${entry.job.id}`
+    : entry.kind === "workflow" ? `workflow:${entry.workflow.id}`
+    : entry.kind === "main" ? "main" : `${entry.kind}:${entry.id}`;
+}
+
+function safeLabel(text: string): string {
+  return stripTerminalSequences(text).replace(/[\r\n\t]/g, " ");
+}
 
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
 export function formatFleetElapsed(ms: number): string {
@@ -104,6 +124,7 @@ export class FleetList {
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
+  private selectedKey = "main";
   /** Set while a view is open; closes presentation, not execution. */
   private viewerClose: (() => void) | undefined;
   private viewerToken: symbol | undefined;
@@ -119,6 +140,15 @@ export class FleetList {
    * minus the close handle, because that overlay belongs to the extension.
    */
   private viewingWorkflowId: string | undefined;
+  private jobs: BackgroundRegistry | undefined;
+  private rootSessionId: (() => string | undefined) | undefined;
+  private knownOwners = new Map<string, string>();
+  private collapsed = new Set<string>();
+  private expandedCompleted = new Set<string>();
+  private viewingJobId: string | undefined;
+  private confirmation: { entry: AgentEntry | JobEntry; action: "stop" | "clean" } | undefined;
+  private actionPending = false;
+  private generation = 0;
 
   constructor(
     private manager: AgentManager,
@@ -132,12 +162,28 @@ export class FleetList {
     private legacyViewerOptions?: (record: AgentRecord) => LegacyViewerOptions,
   ) {}
 
+  setJobSource(registry: BackgroundRegistry, rootSessionId: () => string | undefined): void {
+    this.jobs = registry;
+    this.rootSessionId = rootSessionId;
+  }
+
+  /** Slash-command alias enters the very same tree. */
+  activate(): void {
+    if (!this.ui) return;
+    if (!this.enabled) { this.ui.notify("Enable Fleet view in /agents → Settings to navigate tasks.", "info"); return; }
+    if (this.viewerClose || this.viewingWorkflowId) return;
+    this.active = true;
+    this.selectIndex(0);
+    this.update();
+    if (this.roster(true).length <= 1) this.ui.notify("No tasks in this session.", "info");
+  }
+
   // ---- Lifecycle ----
 
   setEnabled(enabled: boolean): void {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
-    if (!enabled) this.active = false;
+    if (!enabled) { this.active = false; this.confirmation = undefined; }
     this.update();
   }
 
@@ -165,6 +211,13 @@ export class FleetList {
   }
 
   dispose(): void {
+    this.generation++;
+    this.confirmation = undefined;
+    this.actionPending = false;
+    this.knownOwners.clear();
+    this.collapsed.clear();
+    this.expandedCompleted.clear();
+    this.viewingJobId = undefined;
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.inputUnsub?.();
     this.inputUnsub = undefined;
@@ -189,7 +242,7 @@ export class FleetList {
     // it is the thing the user opens to see what its children did. Read off the
     // roster for the same reason activation does: two counts of "is there
     // anything here" drifted apart once before.
-    const hasRows = this.enabled && this.roster().length > 1;
+    const hasRows = this.enabled && this.roster(true).length > 1;
 
     if (!hasRows) {
       if (this.widgetRegistered) {
@@ -199,7 +252,7 @@ export class FleetList {
       }
       if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
       this.active = false;
-      this.selectedIndex = 0;
+      this.selectIndex(0);
       return;
     }
 
@@ -275,18 +328,62 @@ export class FleetList {
    * most of the agents under it, so listing the container first is what makes
    * the list read as a hierarchy rather than a shuffle.
    */
-  private roster(): FleetEntry[] {
-    return [
-      { kind: "main" },
-      ...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })),
-      ...this.agentRecords().map(record => ({ kind: "agent" as const, record })),
-    ];
+  private roster(ignoreCollapse = false): FleetEntry[] {
+    const entries: FleetEntry[] = [{ kind: "main" }];
+    // Only owners already visible in this scope may introduce job rows. Never
+    // infer visibility from the all-jobs store or turn an unknown owner into main.
+    const records = this.manager.listAgents().filter(isTopLevelAgent);
+    for (const record of records) this.knownOwners.set(record.id, record.description);
+    const jobs = this.jobs && !this.jobs.disposed ? [...this.jobs.jobs.values()].filter(job =>
+      job.ownerAgentId ? this.knownOwners.has(job.ownerAgentId)
+        : job.ownerSessionId === this.rootSessionId?.(),
+    ).sort((a, b) => a.startTime - b.startTime) : [];
+    for (const id of this.knownOwners.keys()) {
+      if (!records.some(record => record.id === id) && !jobs.some(job => job.ownerAgentId === id)) this.knownOwners.delete(id);
+    }
+    const addJobs = (owner: string | undefined, depth: number) => {
+      const owned = jobs.filter(job => job.ownerAgentId === owner);
+      const done = owned.filter(job => isTerminalStatus(job.status));
+      entries.push(...owned.filter(job => !isTerminalStatus(job.status)).map(job => ({ kind: "job" as const, job, depth })));
+      if (done.length) {
+        const id = `completed:${owner ?? "main"}`;
+        const failed = done.filter(job => job.status === "failed" || job.status === "killed").length;
+        entries.push({ kind: "group", id, label: `Completed (${done.length}${failed ? `, ${failed} failed/stopped` : ""})`, depth });
+        if (ignoreCollapse || this.expandedCompleted.has(id) || done.some(job => job.id === this.viewingJobId)) {
+          entries.push(...done.map(job => ({ kind: "job" as const, job, depth: depth + 1 })));
+        }
+      }
+    };
+    if (!ignoreCollapse && this.collapsed.has("main")) return entries;
+    entries.push(...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })));
+    const visible = this.jobs ? records.filter(record => record.session || record.status === "running" || record.status === "queued" || jobs.some(job => job.ownerAgentId === record.id))
+      .sort((a, b) => a.startedAt - b.startedAt) : this.agentRecords();
+    for (const record of visible) {
+      entries.push({ kind: "agent", record });
+      if (ignoreCollapse || !this.collapsed.has(`agent:${record.id}`)) addJobs(record.id, 2);
+    }
+    // Keep only a label for evicted owners, not a retained AgentSession. Logs
+    // outlive agent GC, but never gain a new steering/execution capability.
+    for (const [id, description] of this.knownOwners) {
+      if (!records.some(record => record.id === id) && jobs.some(job => job.ownerAgentId === id)) {
+        entries.push({ kind: "owner", id, description });
+        if (ignoreCollapse || !this.collapsed.has(`owner:${id}`)) addJobs(id, 2);
+      }
+    }
+    addJobs(undefined, 1);
+    return entries;
+  }
+
+  private selectIndex(index: number): void {
+    this.selectedIndex = index;
+    const entry = this.roster()[index];
+    this.selectedKey = entry ? entryKey(entry) : "main";
   }
 
   private clampSelection(): void {
-    const max = this.roster().length - 1;
-    if (this.selectedIndex > max) this.selectedIndex = Math.max(0, max);
-    if (this.selectedIndex < 0) this.selectedIndex = 0;
+    const rows = this.roster();
+    const stable = rows.findIndex(entry => entryKey(entry) === this.selectedKey);
+    this.selectIndex(stable >= 0 ? stable : Math.max(0, Math.min(this.selectedIndex, rows.length - 1)));
   }
 
   // ---- Key handling ----
@@ -307,19 +404,27 @@ export class FleetList {
     // while getEditorText() still reads the detached — empty — editor. So when
     // anything but the editor owns the keyboard, stay out of its keys (#123).
     if (!this.editorHasFocus()) {
+      this.confirmation = undefined;
       if (this.active) this.deactivate();
       return undefined;
     }
-
+    this.clampSelection();
+    if (this.actionPending) return { consume: true };
+    if (this.confirmation) {
+      if (matchesKey(data, "escape") || matchesKey(data, "n")) this.confirmation = undefined;
+      else if (matchesKey(data, "y") || matchesKey(data, Key.enter)) void this.confirmAction();
+      this.update();
+      return { consume: true };
+    }
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list.
       const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
       // Gated on the roster, not the agents: a session whose only row is a
       // workflow run still has somewhere to go, and requiring an agent would
       // render the row but refuse to move into it.
-      if (isActivator && this.roster().length > 1 && this.ui.getEditorText() === "") {
+      if (isActivator && this.roster(true).length > 1 && this.ui.getEditorText() === "") {
         this.active = true;
-        this.selectedIndex = 0;
+        this.selectIndex(0);
         this.update();
         return { consume: true };
       }
@@ -329,13 +434,28 @@ export class FleetList {
     // Active — arrows navigate, Enter opens, Esc / Up-past-top exits.
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
-      this.selectedIndex = Math.min(max, this.selectedIndex + 1);
+      this.selectIndex(Math.min(max, this.selectedIndex + 1));
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
-      this.selectedIndex -= 1;
+      this.selectIndex(this.selectedIndex - 1);
+      this.update();
+      return { consume: true };
+    }
+    if (this.jobs && (matchesKey(data, "left") || matchesKey(data, "right") || matchesKey(data, "space"))) {
+      this.toggleSelected(matchesKey(data, "left") ? false : matchesKey(data, "right") ? true : undefined);
+      return { consume: true };
+    }
+    if (this.jobs && (matchesKey(data, "x") || matchesKey(data, "d"))) {
+      const entry = this.roster()[this.selectedIndex];
+      const clean = matchesKey(data, "d");
+      if (entry?.kind === "job" && (clean ? isTerminalStatus(entry.job.status) : entry.job.status === "running")) {
+        this.confirmation = { entry, action: clean ? "clean" : "stop" };
+      } else if (!clean && entry?.kind === "agent" && (entry.record.status === "running" || entry.record.status === "queued")) {
+        this.confirmation = { entry, action: "stop" };
+      }
       this.update();
       return { consume: true };
     }
@@ -363,12 +483,71 @@ export class FleetList {
 
   private deactivate(): void {
     this.active = false;
-    this.selectedIndex = 0;
+    this.selectIndex(0);
     this.update();
+  }
+
+  private toggleSelected(expand?: boolean): void {
+    const entry = this.roster()[this.selectedIndex];
+    if (!entry) return;
+    if (entry.kind === "group") {
+      const next = expand ?? !this.expandedCompleted.has(entry.id);
+      if (next) this.expandedCompleted.add(entry.id);
+      else this.expandedCompleted.delete(entry.id);
+    } else if (entry.kind === "main" || entry.kind === "agent" || entry.kind === "owner") {
+      const key = entryKey(entry);
+      const next = expand ?? this.collapsed.has(key);
+      if (next) this.collapsed.delete(key);
+      else this.collapsed.add(key);
+    }
+    this.update();
+  }
+
+  private async confirmAction(): Promise<void> {
+    const pending = this.confirmation;
+    this.confirmation = undefined;
+    if (!pending) return;
+    const { entry, action } = pending;
+    const generation = this.generation;
+    this.actionPending = true;
+    try {
+      if (entry.kind === "agent") {
+        if (this.manager.getRecord(entry.record.id) === entry.record) this.manager.abort(entry.record.id);
+      } else if (this.jobs && !this.jobs.disposed && this.jobs.jobs.get(entry.job.id) === entry.job) {
+        if (action === "clean") {
+          const removed = cleanupJob(this.jobs, entry.job);
+          this.ui?.notify(removed ? `Removed ${entry.job.id} and its logs.` : "Task is active or its log is being viewed; close the viewer and retry cleanup.", removed ? "info" : "warning");
+        } else if (entry.job.status === "running") {
+          const stopped = await terminateJobSilently(this.jobs, entry.job);
+          if (generation === this.generation) this.ui?.notify(stopped ? `Stopped ${entry.job.id}; its Agent was not stopped.` : `Termination of ${entry.job.id} is unconfirmed.`, stopped ? "info" : "error");
+        }
+      }
+    } catch (error) {
+      if (generation === this.generation) this.ui?.notify(`Task action failed: ${String(error)}`, "error");
+    } finally {
+      if (generation === this.generation) { this.actionPending = false; this.update(); }
+    }
   }
 
   private openSelected(forceSteer = false): void {
     const entry = this.roster()[this.selectedIndex];
+    // A shell is never an agent: Ctrl+Alt+S must not become a shell prompt.
+    if (forceSteer && entry?.kind !== "agent") return;
+    if (entry?.kind === "group" || entry?.kind === "owner") { this.toggleSelected(); return; }
+    if (entry?.kind === "job") {
+      if (!this.ui || !this.jobs || this.jobs.jobs.get(entry.job.id) !== entry.job) return;
+      const release = acquireLogLease(entry.job);
+      const view = openJobLogView(this.ui, entry.job);
+      if (!view) { release(); return; }
+      const token = Symbol();
+      this.viewerToken = token;
+      this.viewingJobId = entry.job.id;
+      this.viewerClose = view.close;
+      void view.closed.catch(error => {
+        if (this.viewerToken === token) this.ui?.notify(`Could not open log: ${String(error)}`, "warning");
+      }).finally(() => { release(); this.clearViewer(token); });
+      return;
+    }
     if (!entry || entry.kind === "main") {
       // `main` = return to the prompt; the native transcript is already shown.
       this.deactivate();
@@ -415,16 +594,21 @@ export class FleetList {
     // still feels natural if the list reordered (an earlier agent finished)
     // while the overlay was open. If that agent is gone, leave the index for
     // update()'s clamp to settle.
-    const viewed = this.viewingAgentId ?? this.viewingWorkflowId;
+    const viewed = this.viewingAgentId ?? this.viewingWorkflowId ?? this.viewingJobId;
+    if (this.viewingJobId) {
+      const job = this.jobs?.jobs.get(this.viewingJobId);
+      if (job && isTerminalStatus(job.status)) this.expandedCompleted.add(`completed:${job.ownerAgentId ?? "main"}`);
+    }
     if (viewed !== undefined) {
       const idx = this.roster().findIndex(e =>
         e.kind === "agent" ? e.record.id === viewed
         : e.kind === "workflow" ? e.workflow.id === viewed
-        : false,
+        : e.kind === "job" ? e.job.id === viewed : false,
       );
-      if (idx >= 0) this.selectedIndex = idx;
+      if (idx >= 0) this.selectIndex(idx);
     }
     this.viewerClose = undefined;
+    this.viewingJobId = undefined;
     this.viewingAgentId = undefined;
     this.viewingWorkflowId = undefined;
     this.update();
@@ -433,19 +617,23 @@ export class FleetList {
   // ---- Rendering ----
 
   private renderBar(width: number, theme: Theme): string[] {
-    const rows = this.roster().slice(1) as (WorkflowEntry | AgentEntry)[];
-    if (rows.length === 0) return [];
+    const rows = this.roster().slice(1);
+    if (rows.length === 0 && this.roster(true).length <= 1) return [];
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
-    const sel = Math.min(this.selectedIndex, rows.length);
+    const stable = this.roster().findIndex(entry => entryKey(entry) === this.selectedKey);
+    const sel = stable >= 0 ? stable : Math.min(this.selectedIndex, rows.length);
 
-    const hint = this.active
-      ? `↑↓ select · enter view${this.manager.hasJobRuntime ? " · Ctrl+Alt+S force steer" : ""} · esc back`
-      : "esc to interrupt · ← for agents · ↓ to manage";
+    const selected = this.roster()[sel];
+    const hint = this.confirmation ? `${this.confirmation.action === "clean" ? "Remove task and logs" : this.confirmation.entry.kind === "agent" ? "Stop Agent and its owned tasks/descendants" : "Stop bash process group ONLY (Agent continues)"}: ${safeLabel(this.confirmation.entry.kind === "agent" ? this.confirmation.entry.record.description : this.confirmation.entry.job.id)}? Enter/y confirm · Esc/n cancel`
+      : this.actionPending ? "Task action in progress…"
+      : this.active
+        ? `↑↓ select · enter view${this.jobs ? " · ←→ fold · x stop · d clean" : ""}${this.manager.hasJobRuntime && selected?.kind === "agent" ? " · Ctrl+Alt+S force steer" : ""} · esc back`
+        : this.jobs ? "esc to interrupt · ↓ tasks" : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");
-    lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme)} main`, width));
+    lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme)} ${this.jobs ? this.collapsed.has("main") ? "▸ " : "▾ " : ""}main`, width));
 
     // Window the rows so the selected one stays visible.
     const visible = Math.min(MAX_AGENT_ROWS, rows.length);
@@ -459,12 +647,26 @@ export class FleetList {
       lines.push(
         row.kind === "workflow" ?
           this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
-        : this.renderAgentRow(a + 1, sel, row.record, width, theme),
+        : row.kind === "agent" ? this.renderAgentRow(a + 1, sel, row.record, width, theme)
+        : this.renderTaskRow(a + 1, sel, row, width, theme),
       );
     }
     if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
 
     return lines;
+  }
+
+  private renderTaskRow(index: number, sel: number, row: FleetEntry, width: number, theme: Theme): string {
+    if (row.kind === "job") {
+      const job = row.job;
+      const colour = job.status === "failed" || job.status === "killed" ? "error" : job.status === "completed" ? "success" : "text";
+      const label = `${job.kind === "agent" ? "process" : job.kind === "monitor" ? "monitor" : "bash"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
+      const status = `${job.status}${job.exitCode !== undefined ? ` exit=${job.exitCode}` : ""} · ${formatFleetElapsed((job.endTime ?? Date.now()) - job.startTime)}`;
+      return rightAlign(`${"  ".repeat(row.depth + 1)}${this.bullet(index, sel, theme)} ${label}`, theme.fg(colour, status), width);
+    }
+    if (row.kind === "group") return truncateToWidth(`${"  ".repeat(row.depth + 1)}${this.bullet(index, sel, theme)} ${this.expandedCompleted.has(row.id) ? "▾" : "▸"} ${theme.fg(row.label.includes("failed") ? "error" : "muted", row.label)}`, width);
+    if (row.kind === "owner") return truncateToWidth(`    ${this.bullet(index, sel, theme)} ${this.collapsed.has(`owner:${row.id}`) ? "▸" : "▾"} Agent ${safeLabel(row.description)} (session released)`, width);
+    return "";
   }
 
   private bullet(rosterIndex: number, sel: number, theme: Theme): string {
@@ -504,7 +706,7 @@ export class FleetList {
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
+    const left = `${this.jobs ? "    " : "  "}${this.bullet(rosterIndex, sel, theme)} ${this.jobs ? this.collapsed.has(`agent:${record.id}`) ? "▸ " : "▾ " : ""}${name}  ${description}`;
     // The record, not the activity tracker — see the note in AgentWidget's
     // running line: only the record carries a nested child's spend, and only it
     // outlives the agent.
@@ -512,7 +714,9 @@ export class FleetList {
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const cost = this.showCost() ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
     const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
-    const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
+    const failed = record.status === "error" || record.status === "aborted" || record.status === "stopped";
+    const right = this.jobs ? theme.fg(failed ? "error" : selected ? "text" : "dim", `${record.status} · ${stats}`)
+      : selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     return rightAlign(left, right, width);
   }
 }

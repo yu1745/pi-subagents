@@ -3,7 +3,7 @@
  * Keyboard shortcut registration.
  *
  *   - Ctrl+Shift+B: move the foreground bash to background
- *   - Ctrl+Shift+J / Shift+Down: open the background task manager
+ *   Task navigation belongs to FleetView (empty prompt Down).
  *   - Ctrl+Shift+X: kill the most recent running job
  *
  * Note: Ctrl+B is reserved by pi for `tui.editor.cursorLeft` (built-in
@@ -21,7 +21,6 @@ import {
 } from "./lifecycle.js";
 import { renderSidebar } from "./registry.js";
 import type { BackgroundRegistry } from "./state.js";
-import { openBgListPanel } from "./ui.js";
 
 /** Register all shortcuts. */
 export function registerShortcuts(
@@ -33,16 +32,6 @@ export function registerShortcuts(
     pi.registerShortcut("ctrl+shift+b", {
         description: "Background the current foreground process",
         handler: async (ctx) => handleCtrlB(reg, ctx),
-    });
-
-    pi.registerShortcut("ctrl+shift+j", {
-        description: "Open background task manager",
-        handler: async (ctx) => openBgListPanel(reg, ctx),
-    });
-
-    pi.registerShortcut("shift+down", {
-        description: "Open background task manager",
-        handler: async (ctx) => openBgListPanel(reg, ctx),
     });
 
     pi.registerShortcut("ctrl+shift+x", {
@@ -81,6 +70,8 @@ async function handleCtrlX(
 
     const target = running[0];
     const generation = reg.generation;
+    if (!await ctx.ui.confirm("Stop bash task?", `Stop only ${jobLabel(target)} and its process group? Its owning Agent will not be stopped.`)) return;
+    if (reg.disposed || reg.generation !== generation || reg.jobs.get(target.id) !== target || target.status !== "running") return;
     const stopped = await terminateJobSilently(reg, target);
     if (reg.disposed || reg.generation !== generation) return;
     renderSidebar(reg, ctx);

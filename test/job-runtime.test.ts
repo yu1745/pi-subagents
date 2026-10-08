@@ -36,7 +36,7 @@ describe("parent-owned Patty job runtime", () => {
     rmSync(cwd, { recursive: true, force: true });
     vi.unstubAllEnvs();
   });
-  const notices = () => main.notices.filter(message => message.customType === EVENT.taskNotification);
+  const notices = (host = main) => host.notices.filter(message => message.customType === EVENT.taskNotification);
   const ownJob = (id: string): Job => {
     const job = [...runtime.registry.jobs.values()].find(job => job.toolCallId === id);
     if (!job) throw new Error(`No owned job for ${id}`);
@@ -71,13 +71,14 @@ describe("parent-owned Patty job runtime", () => {
     expect(job.ownerSessionId).toBe(child.ctx.sessionManager.getSessionId());
     expect(job.cwd).toBe(cwd);
     await until(() => job.status !== "running");
-    expect(notices()).toHaveLength(1);
+    expect(notices(child)).toHaveLength(1);
+    expect(notices()).toHaveLength(0);
     expect(textOf(await main.execute("jobs", { action: "output", jobId: job.id }))).toContain("FINAL");
     await main.execute("jobs", { action: "list" });
     expect(textOf(await main.execute("jobs", { action: "search", pattern: "FINAL" }))).toContain(job.id);
     expect(runtime.registry.jobs.get(job.id)).toBe(job);
     expect(existsSync(job.logPath)).toBe(true);
-    expect(notices()).toHaveLength(1);
+    expect(notices(child)).toHaveLength(1);
   });
 
   it("a real long command releases after its progress window without killing descendants", async () => {
@@ -93,7 +94,8 @@ describe("parent-owned Patty job runtime", () => {
     expect(processExists(job.pid)).toBe(true);
     await until(() => job.status === "completed");
     expect(textOf(await main.execute("jobs", { action: "output", jobId: job.id }))).toContain("LONG_FINAL");
-    expect(notices()).toHaveLength(1);
+    expect(notices(child)).toHaveLength(1);
+    expect(notices()).toHaveLength(0);
   });
 
   it("attach steer releases only its wait, permits continuous steers and later notifies exactly once", async () => {
@@ -114,7 +116,8 @@ describe("parent-owned Patty job runtime", () => {
     expect(job.notified).not.toBe(true);
     expect(processExists(job.pid)).toBe(true);
     await until(() => job.status === "completed");
-    expect(notices()).toHaveLength(1);
+    expect(notices(child)).toHaveLength(1);
+    expect(notices()).toHaveLength(0);
     expect(textOf(await main.execute("jobs", { action: "output", jobId: job.id }))).toContain("ATTACHED_FINAL");
   });
 
@@ -190,7 +193,7 @@ describe("parent-owned Patty job runtime", () => {
     await child.execute("bash", { command: "sleep 0.5; echo DRAIN_FINAL", run_in_background: true }, "drain-job");
     const job = ownJob("drain-job");
     const prompt = vi.fn(async () => {});
-    const session = { prompt } as unknown as AgentSession;
+    const session = { prompt, sendCustomMessage: vi.fn(async () => {}) } as unknown as AgentSession;
     let settled = false;
     const drain = runtime.drain("draining", session).then(() => { settled = true; });
     await delay(20);
