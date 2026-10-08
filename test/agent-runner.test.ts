@@ -152,7 +152,10 @@ function createSession(finalText: string) {
     messages: [] as any[],
     subscribe: vi.fn((listener: (event: any) => void) => {
       listeners.push(listener);
-      return () => {};
+      return () => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      };
     }),
     prompt: vi.fn(async () => {
       session.messages.push({
@@ -215,6 +218,92 @@ beforeEach(() => {
   vi.mocked(createNestedSubagentTools).mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
   lastSession = undefined;
+});
+
+describe("per-run completed turns", () => {
+  afterEach(() => {
+    setGraceTurns(5);
+  });
+
+  it.each(["fresh", "cold", "warm"])("counts three turns and detaches on %s runs", async (kind) => {
+    const { session, listeners } = createSession("done");
+    session.messages.push({ role: "assistant", content: [{ type: "text", text: "old" }] });
+    session.prompt.mockImplementation(async () => {
+      for (let i = 0; i < 3; i++) for (const listener of [...listeners]) listener({ type: "turn_end" });
+    });
+    createAgentSession.mockResolvedValue({ session });
+    const onTurnEnd = vi.fn();
+    const dir = mkdtempSync(join(tmpdir(), "resume-turns-"));
+    const resumeSessionFile = join(dir, "session.jsonl");
+    writeFileSync(resumeSessionFile, JSON.stringify({ type: "session", version: 3, id: "saved", cwd: "/tmp", timestamp: new Date().toISOString() }) + "\n");
+    try {
+      if (kind === "warm") await resumeAgent(session as any, "again", { onTurnEnd });
+      else await runAgent(ctx, "Explore", "go", { pi, onTurnEnd, maxTurns: 0,
+        ...(kind === "cold" ? { resumeSessionFile } : {}) });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(onTurnEnd.mock.calls).toEqual([[1], [2], [3]]);
+    expect(listeners).toHaveLength(0);
+    onTurnEnd.mockClear();
+    await resumeAgent(session as any, "again", { onTurnEnd });
+    expect(onTurnEnd.mock.calls).toEqual([[1], [2], [3]]);
+    expect(listeners).toHaveLength(0);
+  });
+
+  it.each(["throw", "cancel"])("unsubscribes after %s without double counting the next resume", async (mode) => {
+    const { session, listeners } = createSession("done");
+    const controller = new AbortController();
+    const onTurnEnd = vi.fn();
+    session.prompt.mockImplementationOnce(async () => {
+      for (const listener of [...listeners]) listener({ type: "turn_end" });
+      if (mode === "cancel") controller.abort();
+      throw new Error(mode);
+    });
+    await expect(resumeAgent(session as any, "again", { onTurnEnd, signal: controller.signal })).rejects.toThrow(mode);
+    expect(listeners).toHaveLength(0);
+    if (mode === "cancel") expect(session.abort).toHaveBeenCalledTimes(1);
+    session.prompt.mockImplementation(async () => {
+      for (const listener of [...listeners]) listener({ type: "turn_end" });
+    });
+    await resumeAgent(session as any, "again", { onTurnEnd });
+    expect(onTurnEnd.mock.calls).toEqual([[1], [1]]);
+    expect(listeners).toHaveLength(0);
+  });
+
+  it.each(["fresh", "warm"])("enforces the same soft limit and grace turns on %s", async (kind) => {
+    setGraceTurns(2);
+    const { session, listeners } = createSession("done");
+    session.prompt.mockImplementation(async () => {
+      for (let i = 1; i <= 4; i++) {
+        for (const listener of [...listeners]) listener({ type: "turn_end" });
+        expect(session.steer).toHaveBeenCalledTimes(i >= 2 ? 1 : 0);
+        expect(session.abort).toHaveBeenCalledTimes(i >= 4 ? 1 : 0);
+      }
+    });
+    createAgentSession.mockResolvedValue({ session });
+    // No callback: limit enforcement must not depend on a UI subscriber.
+    const result = kind === "warm"
+      ? await resumeAgent(session as any, "again", { maxTurns: 2 })
+      : await runAgent(ctx, "Explore", "go", { pi, maxTurns: 2 });
+    expect(result).toMatchObject({ aborted: true, steered: true });
+    expect(listeners).toHaveLength(0);
+    session.prompt.mockImplementation(async () => {
+      for (let i = 0; i < 4; i++) for (const listener of [...listeners]) listener({ type: "turn_end" });
+    });
+    session.steer.mockClear();
+    session.abort.mockClear();
+    await resumeAgent(session as any, "unlimited", { maxTurns: 0 });
+    expect(session.steer).not.toHaveBeenCalled();
+    expect(session.abort).not.toHaveBeenCalled();
+  });
+
+  it("does not prompt an already cancelled resume", async () => {
+    const { session, listeners } = createSession("done");
+    await expect(resumeAgent(session as any, "again", { signal: AbortSignal.abort(new Error("cancelled")) })).rejects.toThrow("cancelled");
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(listeners).toHaveLength(0);
+  });
 });
 
 describe("agent-runner final output capture", () => {

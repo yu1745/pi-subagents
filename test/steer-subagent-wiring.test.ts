@@ -130,7 +130,7 @@ describe("steer_subagent before the session exists", () => {
 
 describe("steer_subagent once the session exists", () => {
   it("reports failure and emits no event when the steer throws", async () => {
-    // The event is emitted only AFTER steerAgent resolves, so a failed steer
+    // The event is emitted only AFTER session.steer resolves, so a failed steer
     // must not announce itself as delivered.
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
@@ -138,10 +138,11 @@ describe("steer_subagent once the session exists", () => {
 
     const id = await spawnBackground(tools);
     await flush();
-    run.create(fakeSession());
+    const session = fakeSession();
+    run.create(session);
     await flush();
 
-    vi.mocked(steerAgent).mockRejectedValueOnce(new Error("session closed"));
+    session.steer.mockRejectedValueOnce(new Error("session closed"));
     const result = await steer(tools, id, "too late");
 
     expect(textOf(result)).toContain("Failed to steer agent");
@@ -154,20 +155,19 @@ describe("steer_subagent once the session exists", () => {
     await lifecycle.get("session_shutdown")?.();
   });
 
-  it("delivers through steerAgent and announces the steer on success", async () => {
+  it("delivers through the managed session and announces the steer on success", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     const run = heldRun();
 
     const id = await spawnBackground(tools);
     await flush();
-    run.create(fakeSession());
+    const session = fakeSession();
+    run.create(session);
     await flush();
-
-    vi.mocked(steerAgent).mockResolvedValueOnce(undefined as any);
     const result = await steer(tools, id, "refocus");
 
-    expect(steerAgent).toHaveBeenCalledWith(expect.anything(), "refocus");
+    expect(session.steer).toHaveBeenCalledWith("refocus");
     expect(textOf(result)).toContain("Steering message sent");
     expect(pi.events.emit).toHaveBeenCalledWith("subagents:steered", { id, message: "refocus" });
 

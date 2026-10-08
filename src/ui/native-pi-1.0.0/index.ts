@@ -2,7 +2,7 @@
 import { type AgentSession, type ExtensionUIContext, InteractiveMode, type Theme, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { installModalHost100 } from "./modal-host.js";
-import { createReadOnlySessionView } from "./read-only-view.js";
+import { createReadOnlySessionView, type ReadOnlySessionViewOptions } from "./read-only-view.js";
 
 export const SUPPORTED_PI_VERSION = "1.0.0";
 const REGISTRY = Symbol.for("pi-subagents.native-session-view.pi-1.0.0");
@@ -14,12 +14,13 @@ interface NativeMode {
   ui: TUI;
   renderer: TUI;
   isShuttingDown?: boolean;
+  session: AgentSession;
 }
-interface ViewOptions {
-  title?: string;
+interface ViewOptions extends ReadOnlySessionViewOptions {
   signal?: AbortSignal;
 }
 interface NativeUI extends ExtensionUIContext {
+  getSubagentsMainSession?(): AgentSession;
   viewSession?(session: AgentSession, options?: ViewOptions): Promise<void>;
 }
 interface InstalledHook {
@@ -142,6 +143,9 @@ export function installNativeSessionViewPatch(): NativeSessionViewPatch {
           if (shared.owners.size === 0) return method.apply(this, args);
           if (name === "createExtensionUIContext") {
             const ui = method.apply(this, args) as NativeUI;
+            // Namespaced, copied with Pi's UI wrapper, used only for verified
+            // user forwarding in the legacy viewer (never a global singleton).
+            ui.getSubagentsMainSession = () => this.session;
             // A source-patched core already has a native implementation; don't replace it.
             if (typeof ui.viewSession !== "function") {
               ui.viewSession = (session, options = {}) => {

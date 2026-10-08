@@ -23,6 +23,7 @@ import * as PiSDK from "@earendil-works/pi-coding-agent";
 import { abortable } from "./abortable.js";
 import { resolveEffectiveMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
+import type { JobRuntime } from "./jobs/runtime.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import { ResumeStore, validateResumeSession } from "./resume-store.js";
@@ -305,6 +306,10 @@ interface SpawnOptions {
 }
 
 interface ResumeOptions {
+  /** Completed turns in this run, not the session's lifetime total. */
+  onTurnEnd?: (turnCount: number) => void;
+  /** Override this run's limit; otherwise reuse the saved invocation ceiling. */
+  maxTurns?: number;
   /**
    * Run the resumed turn detached in the background: return immediately with
    * the record still "running" (or "queued" at the concurrency limit) and
@@ -431,6 +436,10 @@ export class AgentManager {
    * promise to await, and pi has no tool-execution timeout to bail the caller
    * out.
    */
+  private jobRuntime?: JobRuntime;
+  setJobRuntime(runtime: JobRuntime | undefined): void { this.jobRuntime = runtime; }
+  get hasJobRuntime(): boolean { return this.jobRuntime !== undefined; }
+
   private queue: { id: string; pool: Pool; start: () => Promise<void>; release: () => void }[] = [];
   /** Number of currently running background agents. */
   private runningBackground = 0;
@@ -868,9 +877,11 @@ export class AgentManager {
     }
     const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
 
+    this.jobRuntime?.beginRun(id);
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
+      jobRuntime: this.jobRuntime,
       model: options.model,
       maxTurns: options.maxTurns,
       isolated: options.isolated,
@@ -914,7 +925,7 @@ export class AgentManager {
         depth: record.depth ?? 1,
         maxSubagentDepth: record.maxSubagentDepth,
       },
-      onSessionCreated: (session) => {
+      onSessionCreated: async (session) => {
         if (this.disposed || this.agents.get(id) !== record || record.abortController?.signal.aborted) {
           void shutdownChildSession(session);
           throw new Error("Agent session creation cancelled during shutdown");
@@ -977,7 +988,9 @@ export class AgentManager {
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
-            session.steer(msg).catch(() => {});
+            // Delivery failures surface as a failed agent run, never a silent
+            // loss of a user message previously acknowledged as queued.
+            if (await session.steer(msg) === "handled") throw new Error("Queued steer was intercepted before SDK acceptance");
           }
           record.pendingSteers = undefined;
         }
@@ -1016,8 +1029,10 @@ export class AgentManager {
           record.outputCleanup = undefined;
         }
 
-        // Clean up worktree if used
-        if (record.worktree) {
+        // Nested shell owners must release processes before the parent's tree.
+        const childrenStopped = await this.stopOwnedChildrenJobs(id);
+        // On unconfirmed termination keep the tree; never delete a live cwd.
+        if (record.worktree && childrenStopped && !this.jobRuntime?.hasRunning(id)) {
           // The one moment the child's tree still exists and the child is done
           // writing to it. try/catch, not decoration: a hook that throws must
           // not leave the worktree behind.
@@ -1061,8 +1076,9 @@ export class AgentManager {
           record.outputCleanup = undefined;
         }
 
-        // Best-effort worktree cleanup on error
-        if (record.worktree) {
+        const childrenStopped = await this.stopOwnedChildrenJobs(id);
+        // Preserve the worktree if any process termination cannot be confirmed.
+        if (record.worktree && childrenStopped && !this.jobRuntime?.hasRunning(id)) {
           try {
             const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
             record.worktreeResult = wtResult;
@@ -1131,6 +1147,20 @@ export class AgentManager {
    * parent would burn tokens unseen with no way to reach it. Grandchildren are
    * covered transitively — each abort lands in that child's own settle path.
    */
+  private async stopOwnedChildrenJobs(parentId: string): Promise<boolean> {
+    if (!this.jobRuntime) return true;
+    const owners = new Set([parentId]);
+    for (;;) {
+      const before = owners.size;
+      for (const record of this.agents.values()) if (record.parentAgentId && owners.has(record.parentAgentId)) owners.add(record.id);
+      if (owners.size === before) break;
+    }
+    const children = [...owners].filter(id => id !== parentId);
+    for (const id of children) this.abort(id);
+    const stopped = await Promise.all(children.map(id => this.jobRuntime!.stopOwner(id)));
+    return stopped.every(Boolean);
+  }
+
   private abortOwnedChildren(parentId: string): void {
     for (const [id, record] of this.agents) {
       if (record.parentAgentId === parentId) this.abort(id);
@@ -1280,6 +1310,9 @@ export class AgentManager {
       record.result = undefined;
       record.error = undefined;
       record.completedAt = undefined;
+      // A queued continuation must not inherit an aborted controller from its
+      // previous run; startResume installs the new controller at dispatch.
+      record.abortController = undefined;
       record.status = "queued";
 
       const start = () => this.startResume(id, record, prompt, signal, options);
@@ -1311,6 +1344,7 @@ export class AgentManager {
     }
 
     // Foreground resume: run inline and return the settled record.
+    this.jobRuntime?.beginRun(id);
     this.inFlight.add(id);
     const abortController = new AbortController();
     record.abortController = abortController;
@@ -1322,7 +1356,11 @@ export class AgentManager {
     record.error = undefined;
 
     try {
-      const { text, failure } = await resumeAgent(record.session, prompt, {
+      const { text, failure, aborted, steered } = await resumeAgent(record.session, prompt, {
+        onTurnEnd: options?.onTurnEnd,
+        maxTurns: resolveEffectiveMaxTurns(record.type, options?.maxTurns ?? record.resumeState?.maxTurns),
+        agentId: id,
+        jobRuntime: this.jobRuntime,
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
           options?.onToolActivity?.(activity);
@@ -1341,7 +1379,7 @@ export class AgentManager {
       });
       // Same contract as the spawn path (#144): a failed final turn is an
       // error, not a completion — but the resumed text stays available.
-      record.status = abortController.signal.aborted ? "stopped" : failure ? "error" : "completed";
+      record.status = abortController.signal.aborted ? "stopped" : aborted ? "aborted" : failure ? "error" : steered ? "steered" : "completed";
       if (failure) record.error = failure;
       record.result = text;
       record.completedAt = Date.now();
@@ -1351,6 +1389,7 @@ export class AgentManager {
       record.completedAt = Date.now();
     }
 
+    await this.stopOwnedChildrenJobs(id);
     this.inFlight.delete(id);
     this.persistSettled(record);
     // Same contract as the spawn settle paths: children spawned during the
@@ -1376,8 +1415,8 @@ export class AgentManager {
   ) {
     if (this.disposed || !record.session) return;
     if (record.resumeState) assertValidSpawnCwd(record.resumeState.cwd);
+    this.jobRuntime?.beginRun(id);
     this.inFlight.add(id);
-
     record.status = "running";
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
@@ -1402,7 +1441,8 @@ export class AgentManager {
     // After the record is in its running shape, before the run is kicked off.
     try { options.onStarted?.(); } catch { /* ignore caller wiring errors */ }
 
-    const settle = () => {
+    const settle = async () => {
+      await this.stopOwnedChildrenJobs(id);
       this.inFlight.delete(id);
       this.persistSettled(record);
       detachParentSignal?.();
@@ -1420,6 +1460,10 @@ export class AgentManager {
     };
 
     const promise = resumeAgent(record.session, prompt, {
+      onTurnEnd: options.onTurnEnd,
+      maxTurns: resolveEffectiveMaxTurns(record.type, options.maxTurns ?? record.resumeState?.maxTurns),
+      agentId: id,
+      jobRuntime: this.jobRuntime,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -1436,26 +1480,26 @@ export class AgentManager {
       },
       signal: abortController.signal,
     })
-      .then(({ text, failure }) => {
+      .then(async ({ text, failure, aborted, steered }) => {
         // Don't overwrite status if externally stopped via abort().
         if (record.status !== "stopped") {
           // Same contract as the spawn path (#144): a failed final turn is an
           // error, not a completion — but the resumed text stays available.
-          record.status = failure ? "error" : "completed";
+          record.status = aborted ? "aborted" : failure ? "error" : steered ? "steered" : "completed";
           if (failure) record.error = failure;
         }
         record.result = text;
         record.completedAt ??= Date.now();
-        settle();
+        await settle();
         return text;
       })
-      .catch((err) => {
+      .catch(async (err) => {
         if (record.status !== "stopped") {
           record.status = "error";
           record.error = err instanceof Error ? err.message : String(err);
         }
         record.completedAt ??= Date.now();
-        settle();
+        await settle();
         return "";
       });
 
@@ -1474,12 +1518,23 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record) return false;
     if (record.status !== "running" && record.status !== "queued") return false;
-    if (record.session) {
-      record.session.steer(message).catch(() => {});
-    } else {
-      if (!record.pendingSteers) record.pendingSteers = [];
+    if (record.abortController?.signal.aborted) return false;
+    void this.steerChecked(id, message).catch(() => {});
+    return true;
+  }
+
+  /** Awaitable steering for UI paths that must report delivery failures. */
+  async steerChecked(id: string, message: string): Promise<boolean> {
+    const record = this.agents.get(id);
+    if (!record || (record.status !== "running" && record.status !== "queued") || record.abortController?.signal.aborted) return false;
+    if (!record.session) {
+      record.pendingSteers ??= [];
       record.pendingSteers.push(message);
+      return true;
     }
+    if (record.session.isIdle && this.jobRuntime?.offerSteer(id, message)) return true;
+    const result = await record.session.steer(message);
+    if (result === "handled") throw new Error("Child input was intercepted by another extension; steer receipt is unconfirmed");
     return true;
   }
 
@@ -1612,6 +1667,10 @@ export class AgentManager {
 
     if (record.status !== "running") return false;
     record.abortController?.abort();
+    this.abortOwnedChildren(id);
+    if (this.jobRuntime) void this.jobRuntime.stopOwner(id).catch(error => {
+      record.error = `Failed to stop owned jobs: ${error instanceof Error ? error.message : String(error)}`;
+    });
     record.status = "stopped";
     record.completedAt = Date.now();
     return true;

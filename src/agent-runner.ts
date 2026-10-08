@@ -23,6 +23,7 @@ import { buildParentContext, extractText } from "./context.js";
 import { appendContextManagementAgentIdentity } from "./context-management-identity.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
+import type { JobRuntime } from "./jobs/runtime.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
@@ -57,6 +58,8 @@ const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
  * single-file extensions to the basename minus `.ts`/`.js`.
  */
 export function extensionCanonicalName(extPath: string): string {
+  if (extPath.startsWith("builtin:")) return extPath.slice("builtin:".length).toLowerCase();
+  if (extPath.startsWith("<inline:") && extPath.endsWith(">")) return extPath.slice(8, -1).toLowerCase();
   const base = basename(extPath);
   const name = base === "index.ts" || base === "index.js"
     ? basename(dirname(extPath))
@@ -122,6 +125,8 @@ function extensionPackageName(extPath: string): string | undefined {
  */
 export function extensionCanonicalNames(extPath: string): string[] {
   const canonical = extensionCanonicalName(extPath);
+  if (canonical === "pi-subagents-jobs") return [canonical, "pi-patty-bg-tasks"];
+  if (extPath.startsWith("builtin:") || extPath.startsWith("<inline:")) return [canonical];
   const pkg = extensionPackageName(extPath);
   return pkg && pkg !== canonical ? [canonical, pkg] : [canonical];
 }
@@ -401,6 +406,8 @@ export interface RunOptions {
   pi: ExtensionAPI;
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
+  /** Parent-owned shell service; absent when fusion is disabled. */
+  jobRuntime?: JobRuntime;
   model?: Model<any>;
   maxTurns?: number;
   signal?: AbortSignal;
@@ -460,7 +467,7 @@ export interface RunOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
-  onSessionCreated?: (session: AgentSession) => void;
+  onSessionCreated?: (session: AgentSession) => void | Promise<void>;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /**
@@ -754,6 +761,8 @@ export async function runAgent(
     agentDir,
     noExtensions,
     additionalExtensionPaths,
+    extensionFactories: !noExtensions && options.jobRuntime && options.agentId
+      ? [options.jobRuntime.childExtension(options.agentId)] : undefined,
     extensionsOverride,
     noSkills,
     noPromptTemplates: true,
@@ -1054,29 +1063,15 @@ export async function runAgent(
   }
 
   // Publish a fully initialized session before the first prompt/checkpoint.
-  options.onSessionCreated?.(session);
+  await options.onSessionCreated?.(session);
   options.signal?.throwIfAborted();
 
-  // Track turns for graceful max_turns enforcement
-  let turnCount = 0;
-  const maxTurns = resolveEffectiveMaxTurns(type, options.maxTurns);
-  let softLimitReached = false;
-  let aborted = false;
+  const turns = createRunTurnTracker(session, resolveEffectiveMaxTurns(type, options.maxTurns), options.onTurnEnd);
 
   let currentMessageText = "";
   const unsubTurns = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") {
-      turnCount++;
-      options.onTurnEnd?.(turnCount);
-      if (maxTurns != null) {
-        if (!softLimitReached && turnCount >= maxTurns) {
-          softLimitReached = true;
-          session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
-          aborted = true;
-          session.abort();
-        }
-      }
+      turns.end();
     }
     if (event.type === "message_start") {
       currentMessageText = "";
@@ -1132,10 +1127,20 @@ export async function runAgent(
     // the abort forwarding are still live: torn down first, a retry would be
     // unkillable.
     if (structuredCapture !== undefined && structuredCapture.json === undefined
-      && !aborted && options.signal?.aborted !== true) {
+      && !turns.aborted && options.signal?.aborted !== true) {
       structuredRetried = true;
       await session.prompt(structuredRetryPrompt(structuredCapture));
     }
+    // Keep the original run promise, collectors, and working tree alive until
+    // owned jobs settle. Drain-time steers are managed continuations here.
+    if (options.jobRuntime && options.agentId) {
+      if (turns.aborted || finalTurnError(session, startLen)) await options.jobRuntime.stopOwner(options.agentId);
+      await options.jobRuntime.drain(options.agentId, session, options.signal,
+        () => turns.aborted || Boolean(finalTurnError(session, startLen)));
+    }
+  } catch (error) {
+    if (options.jobRuntime && options.agentId) await options.jobRuntime.stopOwner(options.agentId);
+    throw error;
   } finally {
     unsubTurns();
     collector.unsubscribe();
@@ -1154,12 +1159,34 @@ export async function runAgent(
   return {
     responseText,
     session,
-    aborted,
-    steered: softLimitReached,
+    aborted: turns.aborted,
+    steered: turns.steered,
     failure: finalTurnError(session, startLen) ?? structuredFailure,
     ...(structuredCapture?.json !== undefined ? { structuredJson: structuredCapture.json } : {}),
     ...(structuredRetried ? { structuredRetried } : {}),
   };
+}
+
+/** Per-invocation completed turns; never count the session's previous history. */
+function createRunTurnTracker(session: AgentSession, maxTurns?: number, onTurnEnd?: (count: number) => void) {
+  let count = 0;
+  const state = {
+    aborted: false,
+    steered: false,
+    end() {
+      count++;
+      onTurnEnd?.(count);
+      if (maxTurns == null) return;
+      if (!state.steered && count >= maxTurns) {
+        state.steered = true;
+        session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
+      } else if (state.steered && count >= maxTurns + graceTurns) {
+        state.aborted = true;
+        session.abort();
+      }
+    },
+  };
+  return state;
 }
 
 /**
@@ -1169,12 +1196,16 @@ export async function resumeAgent(
   session: AgentSession,
   prompt: string,
   options: {
+    agentId?: string;
+    jobRuntime?: JobRuntime;
+    onTurnEnd?: (turnCount: number) => void;
+    maxTurns?: number;
     onToolActivity?: (activity: ToolActivity) => void;
     onAssistantUsage?: (usage: LifetimeUsage) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
   } = {},
-): Promise<{ text: string; failure?: string }> {
+): Promise<{ text: string; failure?: string; aborted?: boolean; steered?: boolean }> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
@@ -1182,8 +1213,9 @@ export async function resumeAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
-    ? session.subscribe((event: AgentSessionEvent) => {
+  const turns = createRunTurnTracker(session, normalizeMaxTurns(options.maxTurns), options.onTurnEnd);
+  const unsubEvents = session.subscribe((event: AgentSessionEvent) => {
+        if (event.type === "turn_end") turns.end();
         if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
         if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
         if (event.type === "message_end" && event.message.role === "assistant") {
@@ -1199,11 +1231,19 @@ export async function resumeAgent(
         if (event.type === "compaction_end" && !event.aborted && event.result) {
           options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
         }
-      })
-    : () => {};
+      });
 
   try {
+    options.signal?.throwIfAborted();
     await session.prompt(prompt);
+    if (options.jobRuntime && options.agentId) {
+      if (turns.aborted || finalTurnError(session, startLen)) await options.jobRuntime.stopOwner(options.agentId);
+      await options.jobRuntime.drain(options.agentId, session, options.signal,
+        () => turns.aborted || Boolean(finalTurnError(session, startLen)));
+    }
+  } catch (error) {
+    if (options.jobRuntime && options.agentId) await options.jobRuntime.stopOwner(options.agentId);
+    throw error;
   } finally {
     collector.unsubscribe();
     unsubEvents();
@@ -1213,6 +1253,8 @@ export async function resumeAgent(
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
     failure: finalTurnError(session, startLen),
+    aborted: turns.aborted,
+    steered: turns.steered,
   };
 }
 

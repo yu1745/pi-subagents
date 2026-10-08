@@ -29,6 +29,7 @@ vi.mock("../src/output-file.js", async () => {
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { ensureOutputFile, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
+import { AgentWidget } from "../src/ui/agent-widget.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -127,6 +128,7 @@ describe("Agent tool — background resume wiring", () => {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
     vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   /** Spawn a background agent and let it settle, so it holds a resumable session. */
@@ -142,6 +144,48 @@ describe("Agent tool — background resume wiring", () => {
     await new Promise((r) => setTimeout(r, 0));
     return id;
   }
+
+  it.each([false, true])("wires per-run completed turns for background=%s and resets on repeat", async (background) => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+    const id = await spawnSettled(tools, ctx);
+    // Let the initial spawn's debounce/notification finish before testing two
+    // independent resume receipts (not a same-batch spawn+resume).
+    await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalled());
+    let finish: (() => void) | undefined;
+    let widgetTurns: number | undefined;
+    vi.spyOn(AgentWidget.prototype, "update").mockImplementation(function (this: any) {
+      widgetTurns = this.agentActivity.get(id)?.turnCount;
+    });
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, options) => {
+      expect(options?.onTurnEnd).toBeTypeOf("function");
+      expect(options).toHaveProperty("maxTurns");
+      for (let count = 1; count <= 3; count++) options?.onTurnEnd?.(count);
+      if (background) await new Promise<void>(resolve => { finish = resolve; });
+      return { text: "three turns" };
+    });
+    for (let run = 0; run < 2; run++) {
+      pi.sendMessage.mockClear();
+      const result = await tools.get("Agent").execute("resume-count", {
+        prompt: "continue", description: "Continue", subagent_type: "general-purpose",
+        resume: id, run_in_background: background,
+      }, undefined, undefined, ctx);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (background) {
+        expect(widgetTurns, `resume run ${run}: ${resultText(result)}`).toBe(3);
+        finish!();
+        await vi.waitFor(() => {
+          const notices = pi.sendMessage.mock.calls.filter(([message]: any[]) => message.customType === "subagent-notification");
+          expect(notices).toHaveLength(1);
+          expect(notices[0][0].details.turnCount).toBe(3);
+        });
+      } else {
+        expect(result.details.turnCount).toBe(3);
+      }
+    }
+    await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
 
   // A background spawn deliberately omits the tool-call signal — that signal
   // aborts when the parent turn is interrupted (user Esc), which must not reach

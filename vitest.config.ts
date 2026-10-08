@@ -12,6 +12,9 @@ export default defineConfig({
   // subagent session the extension spawns. dedupe alone is insufficient (it only
   // affects modules Vite resolves; without inline the runtime stays externalized).
   test: {
+    // Legacy wiring fixtures do not implement Patty's UI/tool API. Dedicated
+    // job-runtime suites opt in (or delete the variable to test the default).
+    env: { PI_SUBAGENTS_JOB_RUNTIME: "0" },
     server: { deps: { inline: [/@earendil-works\/pi-/] } },
     // Local reporting only — deliberately no `thresholds`, and not wired into
     // CI. src/index.ts is mostly the /agents wizard, which is TUI flow with

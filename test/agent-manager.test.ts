@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
+import { JobRuntime } from "../src/jobs/runtime.js";
 import type { AgentRecord } from "../src/types.js";
 
-vi.mock("../src/agent-runner.js", () => ({
+vi.mock("../src/agent-runner.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/agent-runner.js")>(),
   runAgent: vi.fn(),
   resumeAgent: vi.fn(),
 }));
@@ -18,7 +20,7 @@ vi.mock("../src/worktree.js", () => ({
   isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent, setGraceTurns } from "../src/agent-runner.js";
 import { addUsage } from "../src/usage.js";
 import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -399,6 +401,40 @@ describe("AgentManager — nested runtime propagation", () => {
     // The child's own settle path stops the generation below it.
     await manager.getRecord(runningChild)!.promise;
     expect(manager.getRecord(grandchild)?.status).toBe("stopped");
+  });
+
+  it.each([false, true])("resume waits for owned child termination before settling (background=%s)", async isBackground => {
+    resolvedRun();
+    manager = new AgentManager();
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", { isBackground: true });
+    await manager.getRecord(parentId)!.promise;
+    const runtime = new JobRuntime(mockPi);
+    manager.setJobRuntime(runtime);
+    let releaseStop!: () => void;
+    const stopGate = new Promise<boolean>(resolve => { releaseStop = () => resolve(true); });
+    const stop = vi.spyOn(runtime, "stopOwner").mockReturnValue(stopGate);
+    let childId = "";
+    let finishChild!: () => void;
+    vi.mocked(resumeAgent).mockImplementation(async () => {
+      vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => {
+        finishChild = () => resolve({ responseText: "stopped", session: mockSession(), aborted: false, steered: false });
+      }));
+      childId = manager.spawn(mockPi, mockCtx, "scout", "child", { isBackground: true, parentAgentId: parentId });
+      return { text: "resumed" };
+    });
+    let settled = false;
+    const pending = manager.resume(parentId, "continue", undefined, { isBackground }).then(async record => {
+      if (isBackground) await record!.promise;
+      settled = true;
+    });
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledWith(childId));
+    expect(settled).toBe(false);
+    releaseStop();
+    finishChild();
+    await pending;
+    await manager.getRecord(childId)!.promise;
+    expect(settled).toBe(true);
+    expect(manager.getRecord(childId)!.status).toBe("stopped");
   });
 
   it("aborts children spawned during a resumed turn", async () => {
@@ -1891,17 +1927,14 @@ describe("AgentManager — pendingSteers flush", () => {
     expect(record.pendingSteers).toBeUndefined();
   });
 
-  it("a steer that rejects does not fail the run", async () => {
-    const steer = vi.fn().mockRejectedValue(new Error("session closed"));
+  it.each(["rejected", "handled"])("a %s startup steer fails visibly instead of silently losing acknowledged input", async outcome => {
+    const steer = outcome === "handled" ? vi.fn().mockResolvedValue("handled") : vi.fn().mockRejectedValue(new Error("session closed"));
     let release: (() => void) | undefined;
-    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, _prompt: any, opts: any) =>
-      new Promise<any>(resolve => {
-        release = () => {
-          opts.onSessionCreated?.({ steer, dispose: vi.fn() });
-          resolve({ responseText: "ok", session: mockSession(), aborted: false, steered: false });
-        };
-      }),
-    );
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, opts: any) => {
+      await new Promise<void>(resolve => { release = resolve; });
+      await opts.onSessionCreated?.({ steer, dispose: vi.fn() });
+      return { responseText: "ok", session: mockSession(), aborted: false, steered: false };
+    });
 
     manager = new AgentManager();
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "p", isBackground: true });
@@ -1909,8 +1942,9 @@ describe("AgentManager — pendingSteers flush", () => {
     manager.steer(id, "hello");
 
     release!();
-    await expect(record.promise).resolves.toBe("ok");
-    expect(record.status).toBe("completed");
+    await record.promise;
+    expect(record.status).toBe("error");
+    expect(record.error).toContain(outcome === "handled" ? "intercepted" : "session closed");
   });
 });
 
@@ -2047,6 +2081,7 @@ describe("AgentManager — background resume", () => {
   let manager: AgentManager;
 
   afterEach(() => {
+    setGraceTurns(5);
     manager?.dispose();
   });
 
@@ -2065,6 +2100,40 @@ describe("AgentManager — background resume", () => {
     await mgr.getRecord(id)!.promise;
     return id;
   }
+
+  it.each([false, true])("counts real turn events and resets each resume (background=%s)", async (isBackground) => {
+    manager = new AgentManager();
+    setGraceTurns(2);
+    const id = await spawnSettled(manager);
+    const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+    vi.mocked(resumeAgent).mockImplementation(actual.resumeAgent);
+    const listeners = new Set<(event: any) => void>();
+    const session = {
+      messages: [],
+      subscribe: (listener: (event: any) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      prompt: async () => {
+        for (let i = 0; i < 3; i++) for (const listener of [...listeners]) listener({ type: "turn_end" });
+      },
+      steer: vi.fn(), abort: vi.fn(), dispose: vi.fn(),
+    };
+    manager.getRecord(id)!.session = session as any;
+    for (let run = 0; run < 2; run++) {
+      const onTurnEnd = vi.fn();
+      const record = await manager.resume(id, "again", undefined, { isBackground, onTurnEnd, maxTurns: 2 });
+      if (isBackground) await record!.promise;
+      expect(onTurnEnd.mock.calls).toEqual([[1], [2], [3]]);
+      expect(record!.status).toBe("steered");
+      expect(listeners.size).toBe(0);
+    }
+    expect(session.steer).toHaveBeenCalledTimes(2);
+    const record = await manager.resume(id, "hard limit", undefined, { isBackground, maxTurns: 1 });
+    if (isBackground) await record!.promise;
+    expect(record!.status).toBe("aborted");
+    expect(session.abort).toHaveBeenCalledTimes(1);
+  });
 
   it("returns immediately with a running record + promise, then settles and fires onComplete", async () => {
     const onComplete = vi.fn();
@@ -2217,7 +2286,12 @@ describe("AgentManager — background resume", () => {
 
     vi.mocked(resumeAgent).mockClear();
     vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    manager.getRecord(id)!.session!.steer = vi.fn().mockResolvedValue("queued");
+    manager.getRecord(id)!.abortController = new AbortController();
+    manager.getRecord(id)!.abortController!.abort();
     expect((await manager.resume(id, "later", undefined, { isBackground: true }))?.status).toBe("queued");
+    expect(await manager.steerChecked(id, "queued continuation correction")).toBe(true);
+    expect(manager.getRecord(id)!.session!.steer).toHaveBeenCalledWith("queued continuation correction");
 
     expect(await manager.resume(id, "later again", undefined, { isBackground: true })).toBeUndefined();
     expect(resumeAgent).not.toHaveBeenCalled();

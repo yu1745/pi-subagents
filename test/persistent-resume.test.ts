@@ -33,7 +33,7 @@ beforeEach(() => {
       sessionManager: sm, messages: sm.buildSessionContext().messages,
       dispose: vi.fn(), subscribe: () => () => {}, steer: async () => {},
     } as unknown as AgentSession;
-    options.onSessionCreated?.(session);
+    await options.onSessionCreated?.(session);
     sm.appendMessage({ role: "user", content: prompt, timestamp: Date.now() });
     sm.appendMessage(fauxAssistantMessage("historical answer"));
     return { session, responseText: "historical answer", aborted: false, steered: false };

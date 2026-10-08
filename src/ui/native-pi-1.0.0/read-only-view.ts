@@ -2,10 +2,18 @@ import {
   type AgentSession, type AgentSessionEvent, FooterComponent, sessionEntryToContextMessages, type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, matchesKey, ScrollView, Text, type TuiMouseEvent, VStack } from "@earendil-works/pi-tui";
+import { ForceSteerComposer } from "../force-steer-composer.js";
 import { assertNativeHost, type NativeFooterData, type NativeHost, NativeTranscript } from "./native-transcript.js";
 import { subscribeSessionView } from "./session-snapshot.js";
 
-export interface ReadOnlySessionViewOptions { title?: string }
+export interface ReadOnlySessionViewOptions {
+  title?: string;
+  canSteer?: () => boolean;
+  onUserSteer?: (message: string, main: AgentSession) => Promise<string>;
+  retryParentSteer?: () => Promise<string>;
+  hasPendingParentSteer?: () => boolean;
+  initialForceSteer?: boolean;
+}
 
 export class ReadOnlySessionView extends VStack {
   readonly transcript: NativeTranscript;
@@ -15,6 +23,7 @@ export class ReadOnlySessionView extends VStack {
   private readonly back: () => void;
   private readonly footer: FooterComponent;
   private readonly footerData: NativeFooterData;
+  private readonly composer?: ForceSteerComposer;
   private unsubscribe?: () => void;
   private unsubscribeBranch?: () => void;
   private disposed = false;
@@ -29,11 +38,23 @@ export class ReadOnlySessionView extends VStack {
     const footerData = new mode.footerDataProvider.constructor(session.sessionManager.getCwd());
     const footer = new FooterComponent(session, footerData);
     footer.setAutoCompactEnabled(session.autoCompactionEnabled);
+    const composer = options.onUserSteer ? new ForceSteerComposer({
+      canSteer: options.canSteer ?? (() => false),
+      send: message => options.onUserSteer!(message, mode.session),
+      retryParent: options.retryParentSteer ?? (() => Promise.reject(new Error("Parent retry unavailable"))),
+      hasPendingParent: options.hasPendingParentSteer ?? (() => false),
+      requestRender: () => mode.ui.requestRender(),
+      initiallyOpen: options.initialForceSteer,
+    }) : undefined;
     const dock = new Container();
     dock.addChild({
-      render: (width) => new Text(theme.fg("accent", `${options.title ?? session.sessionManager.getSessionName() ?? "Session"} · read-only · Esc/Ctrl-C/q back`), 0, 0).render(width),
+      render: (width) => new Text(theme.fg("accent", `${options.title ?? session.sessionManager.getSessionName() ?? "Session"} · read-only transcript · Esc/Ctrl-C/q back`), 0, 0).render(width),
       invalidate() {},
     });
+    if (composer) {
+      dock.addChild(new Text(theme.fg("accent", "Ctrl+Alt+S force steer (bash waits only) · Ctrl+Alt+R retry parent"), 0, 0));
+      dock.addChild(composer);
+    }
     dock.addChild(footer);
     const scrollView = new ScrollView(transcript.container, {
       follow: "end", primary: true, overscroll: "chain", scrollbar: session.settingsManager.getFullscreenScrollbar(),
@@ -51,6 +72,7 @@ export class ReadOnlySessionView extends VStack {
     this.scrollView = scrollView;
     this.footerData = footerData;
     this.footer = footer;
+    this.composer = composer;
     try {
       this.unsubscribeBranch = footerData.onBranchChange(() => { if (!this.disposed) mode.ui.requestRender(); });
       const subscription = subscribeSessionView(session, (event, revision) => this.onEvent(event, revision));
@@ -91,9 +113,12 @@ export class ReadOnlySessionView extends VStack {
     this.host.ui.requestRender();
   }
 
-  /** Only presentation actions. Never dispatch to the parent or to renderer input handlers. */
+  /** Transcript navigation or explicit, scoped user steering; ordinary typing
+   * never falls through to either session's editor/input handlers. */
   handleInput(data: string): void {
-    if (this.disposed || data.includes("\u001b[200~") || data.includes("\u001b[201~")) return;
+    if (this.disposed) return;
+    if (this.composer?.handleInput(data)) return;
+    if (data.includes("\u001b[200~") || data.includes("\u001b[201~")) return;
     const keys = this.host.keybindings;
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q") { this.back(); return; }
     // 1.0.0 has no app.sessionView actions: use configurable native navigation actions.

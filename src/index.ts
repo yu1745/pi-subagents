@@ -19,13 +19,14 @@ import { Type } from "@sinclair/typebox";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
+import { JobRuntime, jobRuntimeEnabled } from "./jobs/runtime.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -111,7 +112,7 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
   const state: AgentActivity = {
     activeTools: new Map(),
     toolUses: 0,
-    turnCount: 1,
+    turnCount: 0,
     maxTurns,
     responseText: "",
     session: undefined,
@@ -307,6 +308,9 @@ export default function (pi: ExtensionAPI) {
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
 
+  const jobRuntime = jobRuntimeEnabled() ? new JobRuntime(pi) : undefined;
+  jobRuntime?.installRoot();
+
   // Factory time precedes InteractiveMode's native UI context creation.
   // A failed/version-mismatched patch disables viewing, never agent execution.
   let nativeViewPatch: ReturnType<typeof installNativeSessionViewPatch> | undefined = installNativeSessionViewPatch();
@@ -469,7 +473,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ---- Individual nudge helper (async join mode) ----
-  function emitIndividualNudge(record: AgentRecord) {
+  function emitIndividualNudge(record: AgentRecord, activity?: AgentActivity) {
     if (record.resultConsumed) return;  // re-check at send time
 
     const notification = formatTaskNotification(record, 500, showCost);
@@ -479,21 +483,24 @@ export default function (pi: ExtensionAPI) {
       customType: "subagent-notification",
       content: notification + footer,
       display: true,
-      details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
+      details: buildNotificationDetails(record, 500, activity),
     }, { deliverAs: "steer", triggerTurn: true });
   }
 
   function sendIndividualNudge(record: AgentRecord) {
+    // Capture this run before removing live activity; a later resume has its own tracker.
+    const activity = agentActivity.get(record.id);
     agentActivity.delete(record.id);
     widget.markFinished(record.id);
     fleet.onAgentFinished(record.id);
-    scheduleNudge(record.id, () => emitIndividualNudge(record));
+    scheduleNudge(record.id, () => emitIndividualNudge(record, activity));
     widget.update();
   }
 
   // ---- Group join manager ----
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
+      const activities = new Map(records.map(r => [r.id, agentActivity.get(r.id)]));
       for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
 
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
@@ -508,9 +515,9 @@ export default function (pi: ExtensionAPI) {
           : `${unconsumed.length} agent(s) finished`;
 
         const [first, ...rest] = unconsumed;
-        const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
+        const details = buildNotificationDetails(first, 300, activities.get(first.id));
         if (rest.length > 0) {
-          details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
+          details.others = rest.map(r => buildNotificationDetails(r, 300, activities.get(r.id)));
         }
 
         pi.sendMessage<NotificationDetails>({
@@ -644,6 +651,8 @@ export default function (pi: ExtensionAPI) {
     // pool grows in a session that will never drain it.
     if (reportUsage) pendingUsage.add(usage);
   });
+
+  manager.setJobRuntime(jobRuntime);
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
@@ -1083,7 +1092,17 @@ export default function (pi: ExtensionAPI) {
     return { action: "handled" };
   });
 
-  pi.on("session_before_switch", async () => {
+  pi.on("session_before_switch", async (_event, ctx) => {
+    if (jobRuntime) {
+      manager.abortAll();
+      try {
+        if (!await jobRuntime.stopAll()) throw new Error("Owned job termination is unconfirmed");
+      } catch (error) {
+        ctx.ui.notify(`Cannot switch sessions: ${error instanceof Error ? error.message : String(error)}`, "error");
+        // Lifecycle exceptions are reported by Pi, not cancellation receipts.
+        return { cancel: true };
+      }
+    }
     uiGeneration++;
     currentCtx = undefined;
     manager.clearCompleted(true);
@@ -1310,10 +1329,13 @@ export default function (pi: ExtensionAPI) {
     // this index, so it is written exactly once.
     const transcriptAnchor = existing.session?.messages.length ?? 0;
 
-    const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(opts.maxTurns);
+    // Like cold recovery, reuse the saved ceiling rather than accumulating history.
+    const maxTurns = resolveEffectiveMaxTurns(existing.type, existing.resumeState?.maxTurns ?? opts.maxTurns);
+    const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(maxTurns);
     // resumeAgent has no onSessionCreated — the session predates this run —
     // so seed it directly, or the widget shows no context % for the agent.
     bgState.session = existing.session;
+    agentActivity.set(id, bgState);
 
     // No `signal`: a background spawn deliberately omits it, and a detached
     // resume must behave the same. Passing it would abort this agent when
@@ -1321,6 +1343,8 @@ export default function (pi: ExtensionAPI) {
     // run_in_background in that same turn keep going.
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
+      maxTurns: maxTurns ?? 0,
+      onTurnEnd: bgCallbacks.onTurnEnd,
       onToolActivity: bgCallbacks.onToolActivity,
       onAssistantUsage: bgCallbacks.onAssistantUsage,
       // Fires when the run actually starts — immediately, or on queue
@@ -1342,7 +1366,6 @@ export default function (pi: ExtensionAPI) {
       batchFinalizeTimer = setTimeout(finalizeBatch, 100);
     }
 
-    agentActivity.set(id, bgState);
     // This agent already finished once, so the widget holds a finished-age
     // for it that is past the linger limit — without clearing it, the
     // resumed run's ✓/✗ line never renders and the agent just vanishes.
@@ -1401,7 +1424,7 @@ export default function (pi: ExtensionAPI) {
       if (record.status === "queued") await record.startGate;
       await manager.awaitStartup(id);
       await record.promise;
-      agentActivity.delete(id);
+      // Keep this run's count until resumeToolAgent builds its result details.
       widget.markFinished(id);
       fleet.onAgentFinished(id);
     } else {
@@ -1446,9 +1469,25 @@ export default function (pi: ExtensionAPI) {
     } else if (!existing?.session) {
       return textResult(`Agent "${ref}" has no saved conversation to resume.`);
     } else {
-      record = isBackground
-        ? await startBackgroundResume(ctx, existing, prompt, opts)
-        : await manager.resume(existing.id, prompt, signal);
+      if (isBackground) {
+        record = await startBackgroundResume(ctx, existing, prompt, opts);
+      } else {
+        const maxTurns = resolveEffectiveMaxTurns(existing.type, existing.resumeState?.maxTurns ?? opts.maxTurns);
+        const { state, callbacks } = createActivityTracker(maxTurns);
+        state.session = existing.session;
+        agentActivity.set(existing.id, state);
+        widget.markRunning(existing.id);
+        widget.ensureTimer();
+        fleet.ensureTimer();
+        try {
+          record = await manager.resume(existing.id, prompt, signal, { ...callbacks, maxTurns: maxTurns ?? 0 });
+        } finally {
+          widget.markFinished(existing.id);
+          fleet.onAgentFinished(existing.id);
+          widget.update();
+          fleet.update();
+        }
+      }
     }
     if (!record) return textResult(`Failed to resume agent "${ref}" — it may still be settling or shutting down.`);
 
@@ -1461,10 +1500,12 @@ export default function (pi: ExtensionAPI) {
       modelName,
       tags: mode ? [mode, ...tags] : tags,
     };
+    const details = buildDetails(base, record, agentActivity.get(record.id));
+    if (!isBackground) agentActivity.delete(record.id);
     if (record.status === "error") {
-      return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(base, record));
+      return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
     }
-    if (!isBackground) return textResult(record.result?.trim() || "No output.", buildDetails(base, record));
+    if (!isBackground) return textResult(record.result?.trim() || "No output.", details);
     const queued = record.status === "queued";
     return textResult(
       `Agent ${queued ? "queued" : "resumed"} in background.\n` +
@@ -3067,7 +3108,7 @@ Terse command-style prompts produce shallow, generic work.
       if (!record || !isTopLevelAgent(record)) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
-      if (record.status !== "running") {
+      if (record.status !== "running" && record.status !== "queued") {
         return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
       }
       if (!record.session) {
@@ -3079,7 +3120,9 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       try {
-        await steerAgent(record.session, params.message);
+        if (!await manager.steerChecked(record.id, params.message)) {
+          return textResult("Cannot steer — agent is no longer running or queued.");
+        }
         pi.events.emit("subagents:steered", { id: record.id, message: params.message });
         const tokens = formatLifetimeTokens(record);
         const contextPercent = getSessionContextPercent(record.session);

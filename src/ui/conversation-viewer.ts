@@ -13,6 +13,7 @@ import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatDuration, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
+import { ForceSteerComposer, type ForceSteerOptions } from "./force-steer-composer.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
@@ -148,6 +149,7 @@ export class ConversationViewer implements Component {
   private keys: ViewerKeys;
   /** Steering composer — present while the user is typing a message to the agent. */
   private composer: Input | undefined;
+  private forceComposer?: ForceSteerComposer;
   /** Resolved once: pi's Markdown theme is fixed for the life of the process. */
   private readonly markdownTheme: MarkdownTheme;
   /** Set by the `m` key. Wins over the setting so `m` works without a persist hook. */
@@ -190,7 +192,9 @@ export class ConversationViewer implements Component {
      * the same thing. Omitted → `m` still cycles, viewer-locally.
      */
     private onMarkdownMode?: (mode: ViewerMarkdownMode) => void,
+    forceSteer?: Omit<ForceSteerOptions, "requestRender">,
   ) {
+    if (forceSteer) this.forceComposer = new ForceSteerComposer({ ...forceSteer, requestRender: () => { if (!this.closed) tui.requestRender(); } });
     this.markdownTheme = resolveMarkdownTheme(theme);
     this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
@@ -200,6 +204,7 @@ export class ConversationViewer implements Component {
   }
 
   handleInput(data: string): void {
+    if (this.forceComposer?.handleInput(data)) return;
     // While composing a steer message, the input owns all keys (Enter sends,
     // Esc cancels — both wired in openComposer()). Editing keys flow through.
     if (this.composer) {
@@ -219,7 +224,8 @@ export class ConversationViewer implements Component {
     // not steerable, fall through so the key still disarms a pending stop.
     if (matchesKey(data, "enter") && this.canSteer()) {
       this.stopArmed = false;
-      this.openComposer();
+      if (this.forceComposer) this.forceComposer.open();
+      else this.openComposer();
       return;
     }
 
@@ -345,7 +351,9 @@ export class ConversationViewer implements Component {
 
     // Footer
     lines.push(hrMid);
-    if (this.composer) {
+    if (this.forceComposer?.composing) {
+      for (const line of this.forceComposer.render(innerW)) lines.push(row(line));
+    } else if (this.composer) {
       // Composer row: the Input renders its own `> ` prompt and cursor.
       lines.push(row(this.composer.render(innerW)[0] ?? ""));
       const composeHint = th.fg("dim", "Enter send · Esc cancel");
@@ -358,7 +366,8 @@ export class ConversationViewer implements Component {
       // the right group so "Esc close" is the only part that truncates first.
       const sep = th.fg("dim", " · ");
       const actions: string[] = [];
-      if (this.canSteer()) actions.push(th.fg("dim", "Enter steer"));
+      if (this.forceComposer) for (const line of this.forceComposer.render(innerW)) lines.push(row(line));
+      if (this.canSteer()) actions.push(th.fg("dim", this.forceComposer ? "Ctrl+Alt+S force steer / Ctrl+Alt+R retry" : "Enter steer"));
       if (this.isStoppable()) {
         actions.push(this.stopArmed ? th.fg("error", "x again to STOP") : th.fg("dim", "x stop"));
       }
@@ -492,7 +501,8 @@ export class ConversationViewer implements Component {
 
   private chromeLines(): number {
     // The composer adds one row above the footer hint while it's open.
-    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0) + (this.composer ? 1 : 0);
+    const forceLines = this.forceComposer?.render(this.lastInnerW || 76).length ?? 0;
+    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0) + (this.composer ? 1 : 0) + forceLines;
   }
 
   private invocationLine(): string | undefined {

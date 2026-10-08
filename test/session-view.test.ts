@@ -11,7 +11,9 @@ vi.mock("../src/ui/native-pi-1.0.0/index.js", () => ({
   getNativeSessionViewUnavailableReason: () => "Readonly viewing requires the Pi 1.0.0 runtime patch; reload or restart Pi.",
 }));
 
-vi.mock("../src/agent-runner.js", () => ({ runAgent: vi.fn(), resumeAgent: vi.fn() }));
+vi.mock("../src/agent-runner.js", () => ({
+  runAgent: vi.fn(), resumeAgent: vi.fn(), resolveEffectiveMaxTurns: (_type: string, limit?: number) => limit,
+}));
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(), cleanupWorktree: vi.fn(), pruneWorktrees: vi.fn(),
 }));

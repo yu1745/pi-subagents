@@ -5,8 +5,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, type KeyId, matchesKey, Text, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { createReadOnlySessionView } from "../src/ui/native-pi-1.0.0/read-only-view.js";
+import { createReadOnlySessionView, type ReadOnlySessionViewOptions } from "../src/ui/native-pi-1.0.0/read-only-view.js";
 import { installSessionViewTracking } from "../src/ui/native-pi-1.0.0/session-snapshot.js";
+import { until } from "./helpers/job-runtime.js";
 
 class FooterData {
   static instances: FooterData[] = [];
@@ -30,7 +31,7 @@ function fixture() {
   const raw = {
     sessionManager: manager, settingsManager: settings, isStreaming: false, _isAgentRunActive: false,
     _entryIdsByMessage: new WeakMap<object, string>(), retryAttempt: 0, autoCompactionEnabled: false,
-    model: undefined, thinkingLevel: "off", getContextUsage: () => undefined,
+    state: { model: undefined }, model: undefined, thinkingLevel: "off", getContextUsage: () => undefined,
     extensionRunner: { getMarkdownTransformers: () => [], getEntryRenderer: () => entryRenderer, getMessageRenderer: () => undefined },
     getToolDefinition: () => undefined,
     _emit(_event: AgentSessionEvent) {}, _appendCustomMessage() {}, dispose: vi.fn(),
@@ -54,7 +55,7 @@ function fixture() {
   const dispose = raw.dispose;
   installSessionViewTracking(session);
   const back = vi.fn();
-  const open = () => createReadOnlySessionView(host, session, theme, back, { title: "child" });
+  const open = (options: ReadOnlySessionViewOptions = {}) => createReadOnlySessionView(host, session, theme, back, { title: "child", ...options });
   return { raw, session, manager, host, back, open, bindings, entryRenderer, dispose };
 }
 
@@ -213,5 +214,38 @@ describe("native Pi 1.0.0 read-only session view", () => {
     expect(() => f.open()).toThrow("disposed");
     expect(FooterData.instances.at(-1)?.dispose).toHaveBeenCalledTimes(1);
     expect(() => createReadOnlySessionView({}, f.session, theme, f.back)).toThrow("Unsupported Pi host");
+  });
+
+  it("force-steer input belongs to the child view and receives the real parent host session", async () => {
+    const f = fixture();
+    const send = vi.fn(async (_message: string, _parent: AgentSession) => "Child steer sent; direct parent steer queued.");
+    const view = f.open({ canSteer: () => true, onUserSteer: send });
+    try {
+      expect(view.render(120).join("\n")).toContain("Ctrl+Alt+S force steer");
+      view.handleInput("\u001b[115;7u");
+      view.handleInput("  child original  ");
+      view.handleInput("\r");
+      await until(() => send.mock.calls.length === 1);
+      expect(send).toHaveBeenCalledExactlyOnceWith("  child original  ", f.host.session);
+      expect(f.host.editor.addToHistory).not.toHaveBeenCalled();
+      expect(f.back).not.toHaveBeenCalled();
+      expect(f.dispose).not.toHaveBeenCalled();
+    } finally { view.dispose(); f.raw.dispose(); }
+  });
+
+  it("cancelled native input and an agent ending while typing send no steering messages", async () => {
+    const f = fixture();
+    let active = true;
+    const send = vi.fn(async () => "sent");
+    const view = f.open({ canSteer: () => active, onUserSteer: send });
+    try {
+      view.handleInput("\u001b[115;7u"); view.handleInput("cancel this"); view.handleInput("\u001b");
+      expect(f.back).not.toHaveBeenCalled();
+      view.handleInput("\u001b[115;7u"); view.handleInput("too late"); active = false; view.handleInput("\r");
+      await Promise.resolve();
+      expect(send).not.toHaveBeenCalled();
+      expect(view.render(120).join("\n")).toContain("finished while composing");
+      expect(f.host.editor.addToHistory).not.toHaveBeenCalled();
+    } finally { view.dispose(); f.raw.dispose(); }
   });
 });
