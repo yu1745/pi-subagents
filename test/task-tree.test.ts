@@ -25,7 +25,7 @@ vi.mock("../src/ui/job-log-view.js", () => ({ openJobLogView: vi.fn() }));
 const DOWN = "\x1b[B", UP = "\x1b[A", LEFT = "\x1b[D", RIGHT = "\x1b[C", ESC = "\x1b", ENTER = "\r";
 const theme = { fg: (colour: string, text: string) => `<${colour}>${text}</${colour}>`, bold: (text: string) => text };
 const disposers: (() => void)[] = [];
-afterEach(() => { for (const dispose of disposers.splice(0)) dispose(); vi.clearAllMocks(); });
+afterEach(() => { for (const dispose of disposers.splice(0)) dispose(); vi.useRealTimers(); vi.clearAllMocks(); });
 
 function job(id: string, ownerAgentId?: string): Job {
   return { id, ownerAgentId, ownerSessionId: ownerAgentId ? "child-session" : "root", command: `command-${id}`, logPath: `/missing/${id}.log`, pid: 0, startTime: 0, status: "running", toolCallId: id, isBackgrounded: true };
@@ -47,11 +47,12 @@ function harness(records: AgentRecord[], jobs: Job[]) {
     },
   } as unknown as AgentManager;
   let widget: { render(width: number): string[] } | undefined;
+  const requestRender = vi.fn();
   let input: ((data: string) => { consume?: boolean } | undefined) | undefined;
   const ui: FleetUICtx = {
     notify: vi.fn(), getEditorText: () => "", viewSession: native.viewSession,
     onTerminalInput: handler => { input = handler; return () => { input = undefined; }; },
-    setWidget: (_key, factory) => { widget = factory?.({ requestRender: vi.fn() }, theme); },
+    setWidget: (_key, factory) => { widget = factory?.({ requestRender }, theme); },
   };
   const fleet = new FleetList(manager);
   fleet.setJobSource(reg, () => "root");
@@ -68,10 +69,46 @@ function harness(records: AgentRecord[], jobs: Job[]) {
     }
     throw new Error(`Row not reachable: ${needle}\n${lines().join("\n")}`);
   };
-  return { fleet, reg, ui, manager, lines, press, select, native };
+  return { fleet, reg, ui, manager, lines, press, select, native, requestRender };
 }
 
 describe("unified task tree", () => {
+  it("keeps short child commands in Completed without changing the tree height", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+    const done = { ...job("done", "a"), status: "completed" as const };
+    const h = harness([agent("a")], [done]);
+    const height = h.lines().length;
+    const quick = { ...job("quick", "a"), startTime: Date.now() };
+    h.reg.jobs.set(quick.id, quick);
+    h.fleet.update();
+    vi.advanceTimersByTime(499);
+    expect(h.lines().length).toBe(height);
+    expect(h.lines().join("\n")).not.toContain("command-quick");
+    quick.status = "completed";
+    h.fleet.update();
+    expect(h.lines().length).toBe(height);
+    expect(h.lines().join("\n")).toContain("Completed (2)");
+    h.select("Completed"); h.press(ENTER);
+    expect(h.lines().join("\n")).toContain("command-quick");
+  });
+
+  it("shows a lone main command after 500ms and keeps the refresh timer alive", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+    const h = harness([], [{ ...job("slow"), startTime: Date.now() }]);
+    expect(h.lines()).toEqual([]);
+    vi.advanceTimersByTime(499);
+    expect(h.lines()).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(h.lines().join("\n")).toContain("command-slow");
+    h.requestRender.mockClear();
+    vi.advanceTimersByTime(100);
+    expect(h.requestRender).toHaveBeenCalled();
+    h.select("command-slow");
+    expect(h.lines().some(line => line.includes("●") && line.includes("command-slow"))).toBe(true);
+  });
+
   it("nests owned bash under visible Agents and excludes foreign sessions and hidden owners", () => {
     const h = harness([agent("a"), agent("hidden", { parentAgentId: "a" })], [job("owned", "a"), job("main"), job("secret", "hidden"), { ...job("foreign"), ownerSessionId: "elsewhere" }]);
     const text = h.lines().join("\n");

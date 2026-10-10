@@ -32,6 +32,8 @@ const FLEET_KEY = "fleet";
 const MAX_AGENT_ROWS = 5;
 /** Re-render cadence so elapsed/token stats tick while agents run. */
 const TICK_MS = 200;
+/** Avoid expanding the tree for commands that finish almost immediately. */
+const JOB_ROW_DELAY_MS = 500;
 /** How long a finished agent lingers in the list before it drops out. */
 const FINISHED_LINGER_MS = 4000;
 
@@ -242,7 +244,8 @@ export class FleetList {
     // it is the thing the user opens to see what its children did. Read off the
     // roster for the same reason activation does: two counts of "is there
     // anything here" drifted apart once before.
-    const hasRows = this.enabled && this.roster(true).length > 1;
+    // Pending rows keep the timer alive even when nothing is visible yet.
+    const hasRows = this.enabled && this.roster(true, true).length > 1;
 
     if (!hasRows) {
       if (this.widgetRegistered) {
@@ -328,7 +331,7 @@ export class FleetList {
    * most of the agents under it, so listing the container first is what makes
    * the list read as a hierarchy rather than a shuffle.
    */
-  private roster(ignoreCollapse = false): FleetEntry[] {
+  private roster(ignoreCollapse = false, includePending = false): FleetEntry[] {
     const entries: FleetEntry[] = [{ kind: "main" }];
     // Only owners already visible in this scope may introduce job rows. Never
     // infer visibility from the all-jobs store or turn an unknown owner into main.
@@ -344,7 +347,9 @@ export class FleetList {
     const addJobs = (owner: string | undefined, depth: number) => {
       const owned = jobs.filter(job => job.ownerAgentId === owner);
       const done = owned.filter(job => isTerminalStatus(job.status));
-      entries.push(...owned.filter(job => !isTerminalStatus(job.status)).map(job => ({ kind: "job" as const, job, depth })));
+      entries.push(...owned.filter(job => !isTerminalStatus(job.status)
+        && (includePending || Date.now() - job.startTime >= JOB_ROW_DELAY_MS))
+        .map(job => ({ kind: "job" as const, job, depth })));
       if (done.length) {
         const id = `completed:${owner ?? "main"}`;
         const failed = done.filter(job => job.status === "failed" || job.status === "killed").length;

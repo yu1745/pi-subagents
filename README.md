@@ -166,6 +166,8 @@ Both paths share session retention and close cleanup: viewed sessions remain pro
 
 While subagents are running, a Claude Code-style navigable list renders **below** the editor:
 
+Running task rows appear after 500ms, on the next UI refresh. Commands that finish sooner go directly into their owner's Completed group, avoiding a brief expansion for each short command. Logs remain available there.
+
 ```
   esc to interrupt · ↓ tasks
 

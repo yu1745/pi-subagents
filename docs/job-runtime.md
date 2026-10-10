@@ -44,6 +44,8 @@ Streaming owners receive the notice inside their existing SDK prompt. Idle owner
 
 ## Unified task navigation
 
+Running task rows appear after 500ms, on the next UI refresh. Faster commands go directly into the owner's Completed group without briefly adding a running row; their logs remain available by expanding the group. This delay affects presentation only.
+
 The integrated runtime uses one FleetView task tree below the editor. Main-session bash tasks are top-level rows under `main`; owned bash tasks nest under their visible Agent. Nested/workflow Agent visibility rules are unchanged: jobs do not create a back door into a hidden owner or another session. The tree itself does not change Agent/jobs tool APIs, execution, process ownership or steering; notification delivery follows the owner-only rule above.
 
 | Key | Action |
