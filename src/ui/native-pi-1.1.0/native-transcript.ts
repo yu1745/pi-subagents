@@ -10,7 +10,7 @@ import type { SessionViewSnapshot } from "./session-snapshot.js";
 type Message = Extract<AgentSessionEvent, { type: "message_start" }>["message"];
 export interface NativeFooterData extends ReadonlyFooterDataProvider { dispose(): void }
 
-/** Deliberately pinned to the presentation fields/methods of InteractiveMode 1.0.0. */
+/** Deliberately pinned to the presentation fields/methods of InteractiveMode 1.1.0. */
 interface Presentation {
   session: AgentSession;
   sessionManager: AgentSession["sessionManager"];
@@ -45,7 +45,7 @@ export interface NativeHost extends Presentation {
 }
 
 export function assertNativeHost(mode: unknown): asserts mode is NativeHost {
-  if (!mode || typeof mode !== "object") throw new Error("Expected Pi 1.0.0 InteractiveMode");
+  if (!mode || typeof mode !== "object") throw new Error("Expected Pi 1.1.0 InteractiveMode");
   const host = mode as NativeHost;
   const methods = ["renderSessionEntries", "renderSessionItems", "addMessageToChat", "addCustomEntryToChat",
     "getRegisteredToolDefinition", "getMarkdownThemeWithSettings", "getMarkdownTransformers", "getUserMessageText",
@@ -58,7 +58,7 @@ export function assertNativeHost(mode: unknown): asserts mode is NativeHost {
     typeof host.footerDataProvider?.constructor !== "function" ||
     typeof host.footerDataProvider?.onBranchChange !== "function" ||
     typeof host.footerDataProvider?.dispose !== "function") {
-    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.0.0 presentation API");
+    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.1.0 presentation API");
   }
 }
 
@@ -89,6 +89,7 @@ export class NativeTranscript {
     if (!tool) {
       tool = new ToolExecutionComponent(name, id, args, {
         showImages: r.settingsManager.getShowImages(), imageWidthCells: r.settingsManager.getImageWidthCells(),
+        outputPad: r.outputPad,
       }, r.getRegisteredToolDefinition(name), r.ui, r.sessionManager.getCwd());
       tool.setExpanded(r.toolOutputExpanded);
       this.container.addChild(tool);
@@ -99,7 +100,7 @@ export class NativeTranscript {
   }
 
   private indexRenderedTools(): void {
-    // Native replay removes finalized/error tools from pendingTools. Keep their 1.0.0
+    // Native replay removes finalized/error tools from pendingTools. Keep their 1.1.0
     // component IDs as well, so a snapshot's final-event gap cannot render them twice.
     for (const child of this.container.children) {
       if ("toolCallId" in child && typeof child.toolCallId === "string" &&
@@ -125,7 +126,7 @@ export class NativeTranscript {
       const component = this.ensureTool(tool.toolName, tool.toolCallId, tool.args);
       if (tool.started) { component.setArgsComplete(); component.markExecutionStarted(); }
       if (tool.complete && tool.result) {
-        component.updateResult({ ...tool.result, isError: tool.isError ?? false });
+        component.updateResult({ ...tool.result, isError: tool.isError ?? false, durationMs: tool.durationMs });
         r.pendingTools.delete(tool.toolCallId);
       } else if (tool.partialResult) component.updateResult({ ...tool.partialResult, isError: false }, true);
     }
@@ -204,7 +205,7 @@ export class NativeTranscript {
         break;
       case "tool_execution_end":
         if (!event.parentToolCallId) {
-          r.pendingTools.get(event.toolCallId)?.updateResult({ ...event.result, isError: event.isError });
+          r.pendingTools.get(event.toolCallId)?.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
           r.pendingTools.delete(event.toolCallId);
         }
         break;

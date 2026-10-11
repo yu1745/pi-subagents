@@ -7,7 +7,7 @@ import {
 interface Overlay { component: Component; preFocus: Component | null; bounds?: unknown }
 interface FocusRestore { status: string; overlay?: Overlay }
 type Cursor = { row: number; col: number } | null;
-/** Deliberately version-specific structural view of the 1.0.0 private runtime. */
+/** Deliberately version-specific structural view of the 1.1.0 private runtime. */
 interface Native extends TUI {
 	getFocusedComponent(): Component | null;
 	stopped: boolean;
@@ -69,21 +69,21 @@ const installed = new WeakSet<TUI>();
 const imageLine = (line: string): boolean => line.includes("\x1b_G") || line.includes("\x1b]1337;File=");
 const layers = ["applySearchHighlights", "compositeScrollToEndIndicator", "compositeOverlays", "applySelection", "compositeFlashes"] as const;
 
-/** Install only on the exact bundled Pi 1.0.0 runtime; never modify a prototype. */
-export function installModalHost100(tui: TUI): { show(component: Component, onClose?: () => void): { close(): void }; dispose(): void } {
+/** Install only on the exact bundled Pi 1.1.0 runtime; never modify a prototype. */
+export function installModalHost110(tui: TUI): { show(component: Component, onClose?: () => void): { close(): void }; dispose(): void } {
 	// Read the host's virtual-module version, not metadata from another on-disk SDK copy.
 	const fullscreen = tui.mode === "fullscreen";
 	const prototype = fullscreen ? TuiAltScreen.prototype : TuiMainScreen.prototype;
 	const n = tui as Native;
 	const hooks = ["doRender", "resetRenderState", "handleTerminalInput", "setFocusInternal", "getFocusedComponent", "hasOverlay", "invalidate", "stop", "showOverlay", "consumeTerminalColorResponse", "consumeTerminalColorSchemeReport", "consumeCellSizeResponse", "isComponentMounted", "isOverlayVisible", "getTopmostVisibleOverlay", "clearOverlayFocusRestore", "hideTerminalCursor", "requestImmediateRender", "extractCursorPosition", "applyLineResets", ...(fullscreen ? ["refreshSearch", ...layers, "clearTextSelection", "stopScrollbarHover", "stopScrollbarDrag", "clearComponentMouseGesture"] : ["collectKittyImageIds", "deleteKittyImages", "positionHardwareCursor", "compositeOverlays"])] as const;
-	if (VERSION !== "1.0.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.0.0 TUI");
+	if (VERSION !== "1.1.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.1.0 TUI");
 	for (const key of hooks) {
 		const own = Object.getOwnPropertyDescriptor(tui, key);
-		if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.0.0 hook: ${key}`);
+		if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.1.0 hook: ${key}`);
 		const expected = Reflect.get(prototype, key);
-		if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.0.0 hook: ${key}`);
+		if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.1.0 hook: ${key}`);
 	}
-	if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.0.0 renderer state");
+	if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.1.0 renderer state");
 
 	const restores: Array<() => void> = [];
 	function patch<K extends keyof Native>(key: K, value: Native[K]): void {
@@ -144,9 +144,15 @@ export function installModalHost100(tui: TUI): { show(component: Component, onCl
 		let output = `\x1b[?2026h${n.deleteKittyImages(ids)}`;
 		// Clear every target row before any image placement (WezTerm's EL erases images).
 		for (let row = 0; row < height; row++) output += `\x1b[${row + 1};1H\x1b[2K`;
+		// WezTerm also erases image cells on later text writes. Place images only
+		// after all text, matching Pi 1.1.0's fullscreen redraw ordering.
 		for (let row = 0; row < height; row++) {
 			const line = lines[row] ?? "";
-			output += `\x1b[${row + 1};1H${imageLine(line) ? line : sliceByColumn(line, 0, width, true)}`;
+			if (!imageLine(line)) output += `\x1b[${row + 1};1H${sliceByColumn(line, 0, width, true)}`;
+		}
+		for (let row = 0; row < height; row++) {
+			const line = lines[row] ?? "";
+			if (imageLine(line)) output += `\x1b[${row + 1};1H${line}`;
 		}
 		tui.terminal.write(`${output}\x1b[?25l\x1b[?2026l`);
 	}
@@ -174,7 +180,7 @@ export function installModalHost100(tui: TUI): { show(component: Component, onCl
 				get columns() { return tui.terminal.columns; }, get rows() { return tui.terminal.rows; },
 				kittyProtocolActive: false, start: noop, stop: noop, drainInput: async () => {}, write: noop,
 				moveBy: noop, hideCursor: noop, showCursor: noop, clearLine: noop, clearFromCursor: noop,
-				clearScreen: noop, setTitle: noop, setProgress: noop,
+				clearScreen: noop, setTitle: noop, setProgress: noop, setProgramStatus: noop,
 			};
 			helper = new TuiAltScreen(inert) as unknown as Native;
 			helper.stopped = false;

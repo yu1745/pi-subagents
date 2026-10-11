@@ -1,12 +1,12 @@
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
 import {
   type AgentSession, type AgentSessionEvent, getMarkdownTheme, InteractiveMode, initTheme,
-  type MarkdownTransformer, SessionManager, SettingsManager, type Theme,
+  type MarkdownTransformer, SessionManager, SettingsManager, type Theme, type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
-import { Container, type KeyId, matchesKey, Text, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { Container, KeybindingsManager, Text, TUI_KEYBINDINGS, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { createReadOnlySessionView, type ReadOnlySessionViewOptions } from "../src/ui/native-pi-1.0.0/read-only-view.js";
-import { installSessionViewTracking } from "../src/ui/native-pi-1.0.0/session-snapshot.js";
+import { createReadOnlySessionView, type ReadOnlySessionViewOptions } from "../src/ui/native-pi-1.1.0/read-only-view.js";
+import { installSessionViewTracking } from "../src/ui/native-pi-1.1.0/session-snapshot.js";
 import { until } from "./helpers/job-runtime.js";
 
 class FooterData {
@@ -32,24 +32,22 @@ function fixture() {
     sessionManager: manager, settingsManager: settings, isStreaming: false, _isAgentRunActive: false,
     _entryIdsByMessage: new WeakMap<object, string>(), retryAttempt: 0, autoCompactionEnabled: false,
     state: { model: undefined }, model: undefined, thinkingLevel: "off", getContextUsage: () => undefined,
-    extensionRunner: { getMarkdownTransformers: () => [], getEntryRenderer: () => entryRenderer, getMessageRenderer: () => undefined },
+    extensionRunner: { getMarkdownTransformers: () => [], getEntryRenderer: () => entryRenderer, getMessageRenderer: () => undefined,
+      resolveToolRenderers: (_name: string, next: () => ToolRenderers | undefined) => next() },
     getToolDefinition: () => undefined,
     _emit(_event: AgentSessionEvent) {}, _appendCustomMessage() {}, dispose: vi.fn(),
   };
   const session = raw as unknown as AgentSession;
-  const bindings: Record<string, KeyId[]> = {
-    "tui.select.up": ["up"], "tui.select.down": ["down"],
-    "tui.altScreen.pageUp": ["pageUp"], "tui.altScreen.pageDown": ["pageDown"],
-    "tui.altScreen.top": ["home"], "tui.altScreen.bottom": ["end"],
-    "app.tools.expand": ["ctrl+o"], "app.thinking.toggle": ["ctrl+t"],
-  };
+  const bindings = new KeybindingsManager({ ...TUI_KEYBINDINGS,
+    "app.tools.expand": { defaultKeys: "ctrl+o" }, "app.thinking.toggle": { defaultKeys: "ctrl+t" },
+  });
   // The actual SDK prototype, not copied renderer helpers. No controller constructor/init/run.
   const host = Object.defineProperties(Object.create(InteractiveMode.prototype), Object.getOwnPropertyDescriptors({
     session: { parent: true }, chatContainer: new Container(), pendingTools: new Map(),
     ui: { requestRender: vi.fn() }, footerDataProvider: new FooterData("/parent"),
     mermaidMarkdownTransformer: ((text: string) => text) as MarkdownTransformer,
     hiddenThinkingLabel: "Thinking...", toolOutputExpanded: true,
-    keybindings: { matches: (data: string, action: string) => (bindings[action] ?? []).some((key) => matchesKey(data, key)) },
+    keybindings: bindings,
     editor: { addToHistory: vi.fn() },
   }));
   const dispose = raw.dispose;
@@ -61,7 +59,7 @@ function fixture() {
 
 beforeAll(() => { initTheme("dark"); getMarkdownTheme(); });
 
-describe("native Pi 1.0.0 read-only session view", () => {
+describe("native Pi 1.1.0 read-only session view", () => {
   it("replays using native built-in/custom renderers without touching the parent", () => {
     const f = fixture();
     f.manager.appendMessage({ role: "user", content: "question", timestamp: 1 });
@@ -151,9 +149,20 @@ describe("native Pi 1.0.0 read-only session view", () => {
       expect(scroll).not.toHaveBeenCalled();
       view.handleInput("\u001b[A");
       expect(scroll).toHaveBeenLastCalledWith(-1);
-      f.bindings["tui.select.up"] = ["k"];
+      f.bindings.setUserBindings({ "tui.select.up": ["k"] });
       view.handleInput("k");
       expect(scroll).toHaveBeenCalledTimes(2);
+      const top = vi.spyOn(view.scrollView, "scrollToStart");
+      const bottom = vi.spyOn(view.scrollView, "scrollToEnd");
+      view.handleInput("\u001b[H"); view.handleInput("\u001b[F");
+      expect(top).not.toHaveBeenCalled(); expect(bottom).not.toHaveBeenCalled();
+      view.handleInput("\u001b[1;5H"); view.handleInput("\u001b[1;5F");
+      expect(top).toHaveBeenCalledOnce(); expect(bottom).toHaveBeenCalledOnce();
+      f.bindings.setUserBindings({ "tui.altScreen.top": "alt+t", "tui.altScreen.bottom": "alt+b" });
+      view.handleInput("\u001b[1;5H"); view.handleInput("\u001b[1;5F");
+      expect(top).toHaveBeenCalledOnce(); expect(bottom).toHaveBeenCalledOnce();
+      view.handleInput("\u001bt"); view.handleInput("\u001bb");
+      expect(top).toHaveBeenCalledTimes(2); expect(bottom).toHaveBeenCalledTimes(2);
       view.handleInput("\u000f");
       expect(view.transcript.receiver.toolOutputExpanded).toBe(true);
       const thinking = view.transcript.receiver.hideThinkingBlock;

@@ -1,11 +1,11 @@
 /** Runtime-only integration for the exact Pi release named below. Not a public SDK adapter. */
 import { type AgentSession, type ExtensionUIContext, InteractiveMode, type Theme, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { installModalHost100 } from "./modal-host.js";
+import { installModalHost110 } from "./modal-host.js";
 import { createReadOnlySessionView, type ReadOnlySessionViewOptions } from "./read-only-view.js";
 
-export const SUPPORTED_PI_VERSION = "1.0.0";
-const REGISTRY = Symbol.for("pi-subagents.native-session-view.pi-1.0.0");
+export const SUPPORTED_PI_VERSION = "1.1.0";
+const REGISTRY = Symbol.for("pi-subagents.native-session-view.pi-1.1.0");
 const HOOKS = ["createExtensionUIContext", "resetExtensionUI", "shutdown", "stop", "switchTuiMode"] as const;
 type HookName = (typeof HOOKS)[number];
 type NativeMethod = (this: NativeMode, ...args: unknown[]) => unknown;
@@ -62,7 +62,7 @@ function openView(state: Registry, mode: NativeMode, session: AgentSession, them
 
   return new Promise<void>((resolve, reject) => {
     let view: (Component & { dispose(): void }) | undefined;
-    let host: ReturnType<typeof installModalHost100> | undefined;
+    let host: ReturnType<typeof installModalHost110> | undefined;
     let modal: { close(): void } | undefined;
     let closed = false;
     const finish = (failure?: unknown) => {
@@ -82,7 +82,7 @@ function openView(state: Registry, mode: NativeMode, session: AgentSession, them
     const close = () => finish();
     state.views.set(mode, close);
     try {
-      host = installModalHost100(mode.renderer);
+      host = installModalHost110(mode.renderer);
       view = createReadOnlySessionView(mode, session, theme, close, options);
       if (closed) {
         view.dispose();

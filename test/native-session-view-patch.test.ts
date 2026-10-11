@@ -13,21 +13,21 @@ const mocks = vi.hoisted(() => {
     stop() { calls.push("stop"); }
     switchTuiMode() { calls.push("switch"); return true; }
   }
-  return { version: "1.0.0", Mode, calls, create: vi.fn(), host: vi.fn() };
+  return { version: "1.1.0", Mode, calls, create: vi.fn(), host: vi.fn() };
 });
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
   ...await importOriginal<Record<string, unknown>>(),
   InteractiveMode: mocks.Mode,
   get VERSION() { return mocks.version; },
 }));
-vi.mock("../src/ui/native-pi-1.0.0/read-only-view.js", () => ({ createReadOnlySessionView: mocks.create }));
-vi.mock("../src/ui/native-pi-1.0.0/modal-host.js", () => ({ installModalHost100: mocks.host }));
+vi.mock("../src/ui/native-pi-1.1.0/read-only-view.js", () => ({ createReadOnlySessionView: mocks.create }));
+vi.mock("../src/ui/native-pi-1.1.0/modal-host.js", () => ({ installModalHost110: mocks.host }));
 
 import {
   getNativeSessionViewUnavailableReason,
   installNativeSessionViewPatch,
   type NativeSessionViewPatch,
-} from "../src/ui/native-pi-1.0.0/index.js";
+} from "../src/ui/native-pi-1.1.0/index.js";
 
 type ViewerUI = ExtensionUIContext & { viewSession(session: AgentSession, options?: { signal?: AbortSignal }): Promise<void> };
 const handles: NativeSessionViewPatch[] = [];
@@ -50,7 +50,7 @@ function uiFor(mode: InstanceType<typeof mocks.Mode>) {
 }
 
 beforeEach(() => {
-  mocks.version = "1.0.0";
+  mocks.version = "1.1.0";
   mocks.calls.length = 0;
   mocks.create.mockReset();
   mocks.host.mockReset();
@@ -77,7 +77,7 @@ afterEach(() => {
   prototype.stop = originalStop;
 });
 
-describe("Pi 1.0.0 native view bridge", () => {
+describe("Pi 1.1.0 native view bridge", () => {
   it("injects a nonprompt API and patches the actual renderer, not the UI facade", async () => {
     expect(install().supported).toBe(true);
     const mode = new mocks.Mode();
@@ -187,12 +187,12 @@ describe("Pi 1.0.0 native view bridge", () => {
     expect(hostDispose).toHaveBeenCalledOnce();
   });
 
-  it("rejects a different Pi version without touching prototypes", () => {
-    mocks.version = "1.0.4";
+  it.each(["1.0.0", "1.0.4", "1.1.1"])("rejects Pi %s without touching prototypes", version => {
+    mocks.version = version;
     const handle = install();
     expect(handle.supported).toBe(false);
-    expect(handle.reason).toContain("1.0.0");
-    expect(handle.reason).toContain("1.0.4");
+    expect(handle.reason).toContain("1.1.0");
+    expect(handle.reason).toContain(version);
     expect(prototype.createExtensionUIContext).toBe(originalContext);
     expect(getNativeSessionViewUnavailableReason()).toContain("tightly coupled");
   });

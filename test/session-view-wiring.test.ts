@@ -6,12 +6,12 @@ const patch = vi.hoisted(() => ({
   install: vi.fn(),
   track: vi.fn(),
 }));
-vi.mock("../src/ui/native-pi-1.0.0/index.js", () => ({
-  SUPPORTED_PI_VERSION: "1.0.0",
+vi.mock("../src/ui/native-pi-1.1.0/index.js", () => ({
+  SUPPORTED_PI_VERSION: "1.1.0",
   installNativeSessionViewPatch: patch.install,
-  getNativeSessionViewUnavailableReason: () => "Readonly viewing requires the Pi 1.0.0 runtime patch; reload or restart Pi.",
+  getNativeSessionViewUnavailableReason: () => "Readonly viewing requires the Pi 1.1.0 runtime patch; reload or restart Pi.",
 }));
-vi.mock("../src/ui/native-pi-1.0.0/session-snapshot.js", () => ({ installSessionViewTracking: patch.track }));
+vi.mock("../src/ui/native-pi-1.1.0/session-snapshot.js", () => ({ installSessionViewTracking: patch.track }));
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");

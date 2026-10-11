@@ -1,6 +1,6 @@
-import { type Component, getCapabilities, Image, ScrollView, setCapabilities, setCellDimensions, type Terminal, TuiAltScreen, TuiMainScreen, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { type Component, Container, getCapabilities, Image, ScrollView, setCapabilities, setCellDimensions, type Terminal, Text, TuiAltScreen, TuiMainScreen, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { installModalHost100 } from "../src/ui/native-pi-1.0.0/modal-host.js";
+import { installModalHost110 as installModalHost } from "../src/ui/native-pi-1.1.0/modal-host.js";
 
 class FakeTerminal implements Terminal {
 	columns = 40;
@@ -23,6 +23,7 @@ class FakeTerminal implements Terminal {
 	clearScreen(): void {}
 	setTitle(): void {}
 	setProgress(): void {}
+	setProgramStatus(): void {}
 }
 class Recorder implements Component {
 	focused = false;
@@ -43,7 +44,7 @@ for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
 			const tui = new Renderer(terminal);
 			const editor = new Recorder();
 			tui.addChild(editor); tui.setFocus(editor); tui.start(); tui.renderNow();
-			const host = installModalHost100(tui);
+			const host = installModalHost(tui);
 			try {
 				const modal = new Recorder(); modal.lines = ["modal"];
 				const prior = tui.showOverlay(new Recorder()); tui.renderNow();
@@ -75,7 +76,7 @@ for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
 		it("restores replacement editors, preserves descriptor ownership, and detaches on stop", () => {
 			const terminal = new FakeTerminal(); const tui = new Renderer(terminal);
 			const editor = new Recorder(); tui.addChild(editor); tui.setFocus(editor); tui.start();
-			const host = installModalHost100(tui); const dialog = tui.showOverlay(new Recorder());
+			const host = installModalHost(tui); const dialog = tui.showOverlay(new Recorder());
 			const scope = host.show(new Recorder());
 			tui.removeChild(editor); const replacement = new Recorder(); tui.addChild(replacement); tui.setFocus(replacement); dialog.hide();
 			scope.close(); expect(tui.getFocusedComponent()).toBe(replacement);
@@ -91,7 +92,7 @@ it("regular mode freezes history and appends background output once, without cle
 	const terminal = new FakeTerminal(); const tui = new TuiMainScreen(terminal);
 	const editor = new Recorder(); editor.lines = Array.from({ length: 20 }, (_, i) => `history ${i}`);
 	tui.addChild(editor); tui.start(); tui.renderNow();
-	const before = tui.captureRenderState(); const host = installModalHost100(tui); const scope = host.show(new Recorder());
+	const before = tui.captureRenderState(); const host = installModalHost(tui); const scope = host.show(new Recorder());
 	try {
 		tui.renderNow(); editor.lines.push("unique append"); tui.requestRender(true); tui.renderNow();
 		expect(tui.captureRenderState()).toEqual(before);
@@ -107,7 +108,7 @@ it("regular mode freezes history and appends background output once, without cle
 for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
 	it(`${Renderer.name} closes the owner exactly once on direct stop, including reentrant cleanup`, () => {
 		const tui = new Renderer(new FakeTerminal()); tui.start();
-		const host = installModalHost100(tui); let calls = 0;
+		const host = installModalHost(tui); let calls = 0;
 		const scope = host.show(new Recorder(), () => {
 			calls++; scope.close(); host.dispose();
 			expect(tui.getFocusedComponent()).not.toBe(modal);
@@ -120,7 +121,7 @@ for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
 		const capabilities = getCapabilities();
 		setCapabilities({ ...capabilities, images: "kitty" }); setCellDimensions({ widthPx: 10, heightPx: 20 });
 		const terminal = new FakeTerminal(); const tui = new Renderer(terminal); tui.start();
-		const host = installModalHost100(tui);
+		const host = installModalHost(tui);
 		try {
 			const image = new Image("AAAA", "image/png", { fallbackColor: (text) => text }, { imageId: 34567, maxHeightCells: 30 }, { widthPx: 200, heightPx: 600 });
 			const scroll = new ScrollView(image, { scrollbar: "hidden" });
@@ -147,7 +148,7 @@ it("suspends parent scroll, search and gestures across forced frames and resize"
 	tui.setLayoutRoot(scroll); tui.setFocus(editor); tui.start(); tui.renderNow(); scroll.scrollTo(30); tui.renderNow();
 	terminal.input("\x1b[102;6u"); terminal.input("row 40"); tui.renderNow();
 	const search = tui.getFocusedComponent(); const top = scroll.scrollTop;
-	const host = installModalHost100(tui);
+	const host = installModalHost(tui);
 	try {
 		const scope = host.show(new Recorder()); editor.lines.push("background row");
 		terminal.rows = 10; tui.requestRender(true); tui.renderNow();
@@ -157,14 +158,40 @@ it("suspends parent scroll, search and gestures across forced frames and resize"
 		expect(editor.lines[0]).toBe("row 0"); expect(tui.hasActiveSelection()).toBe(false);
 	} finally { host.dispose(); tui.stop(); }
 });
+it("regular modal paints text before Kitty placements, including parent restoration", () => {
+	const capabilities = getCapabilities();
+	setCapabilities({ ...capabilities, images: "kitty" }); setCellDimensions({ widthPx: 10, heightPx: 20 });
+	const terminal = new FakeTerminal(); const tui = new TuiMainScreen(terminal);
+	const content = new Container();
+	content.addChild(new Image("AAAA", "image/png", { fallbackColor: text => text },
+		{ imageId: 45678, maxHeightCells: 3 }, { widthPx: 20, heightPx: 60 }));
+	content.addChild(new Text("after-image", 0, 0));
+	tui.addChild(content); tui.start(); tui.renderNow();
+	const host = installModalHost(tui);
+	try {
+		const modal = host.show(content);
+		for (const restore of [false, true]) {
+			terminal.writes = [];
+			if (restore) modal.close();
+			tui.renderNow();
+			const output = terminal.writes.join("");
+			const cleared = output.lastIndexOf("\x1b[2K");
+			const placement = output.indexOf("\x1b_G", cleared + 1);
+			expect(cleared).toBeGreaterThanOrEqual(0);
+			expect(output.indexOf("after-image")).toBeGreaterThan(cleared);
+			expect(placement).toBeGreaterThan(output.indexOf("after-image"));
+			expect(output).not.toContain("\x1b[3J");
+		}
+	} finally { host.dispose(); tui.stop(); setCapabilities(capabilities); }
+});
 it("fails closed for subclasses, nonextensible instances and prepatched hooks", () => {
 	class Other extends TuiMainScreen {}
-	expect(() => installModalHost100(new Other(new FakeTerminal()))).toThrow(/bundled/);
+	expect(() => installModalHost(new Other(new FakeTerminal()))).toThrow(/bundled/);
 	const fixed = new TuiMainScreen(new FakeTerminal());
 	const focus = Object.getOwnPropertyDescriptor(fixed, "focusedComponent");
 	Object.preventExtensions(fixed);
-	expect(() => installModalHost100(fixed)).toThrow(/extensible/);
+	expect(() => installModalHost(fixed)).toThrow(/extensible/);
 	expect(Object.getOwnPropertyDescriptor(fixed, "focusedComponent")).toEqual(focus);
 	const tui = new TuiMainScreen(new FakeTerminal()); tui.invalidate = () => {};
-	expect(() => installModalHost100(tui)).toThrow(/hook/);
+	expect(() => installModalHost(tui)).toThrow(/hook/);
 });

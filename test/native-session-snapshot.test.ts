@@ -7,7 +7,7 @@ import {
   SessionManager, SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { installSessionViewTracking, subscribeSessionView } from "../src/ui/native-pi-1.0.0/session-snapshot.js";
+import { installSessionViewTracking, subscribeSessionView } from "../src/ui/native-pi-1.1.0/session-snapshot.js";
 import { fauxModelBackend } from "./helpers/faux-model-backend.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 
@@ -39,7 +39,7 @@ function fake() {
 }
 const user: AgentMessage = { role: "user", content: "hello", timestamp: 1 };
 
-describe("Pi 1.0.0 session view runtime tracking", () => {
+describe("Pi 1.1.0 session view runtime tracking", () => {
   it("publishes before observers and covers persistence gaps with atomic subscriptions", async () => {
     const { raw, session, snapshot, publicListener } = fake();
     expect(installSessionViewTracking(session)).toBe(true);
@@ -102,7 +102,7 @@ describe("Pi 1.0.0 session view runtime tracking", () => {
     const second = await vi.importActual<{
       installSessionViewTracking: typeof installSessionViewTracking;
       subscribeSessionView: typeof subscribeSessionView;
-    }>("../src/ui/native-pi-1.0.0/session-snapshot.js");
+    }>("../src/ui/native-pi-1.1.0/session-snapshot.js");
     expect(second.installSessionViewTracking).not.toBe(installSessionViewTracking);
     expect(second.installSessionViewTracking(session)).toBe(true);
     expect([raw._emit, raw._appendCustomMessage, raw.dispose]).toEqual(wrappers);
@@ -111,7 +111,7 @@ describe("Pi 1.0.0 session view runtime tracking", () => {
     expect(view.snapshot).toEqual(snapshot());
     expect(view.snapshot).toMatchObject({ revision: 3, pendingMessages: [user], streamingMessage: message });
     expect(view.snapshot.tools).toHaveLength(1);
-    const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.0.0");
+    const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.1.0");
     expect(Object.getOwnPropertyDescriptor(session, key)?.enumerable).toBe(false);
 
     raw._emit({ type: "message_end", message: user });
@@ -123,7 +123,7 @@ describe("Pi 1.0.0 session view runtime tracking", () => {
     expect(cleaned.snapshot.pendingMessages).toEqual([]);
     cleaned.unsubscribe();
     first.unsubscribe();
-    raw._emit({ type: "agent_settled" });
+    raw._emit({ type: "agent_settled", aborted: false });
     expect(firstListener).toHaveBeenCalledTimes(4);
     expect(secondListener).toHaveBeenCalledTimes(2);
     expect(snapshot()).toMatchObject({ revision: 5, tools: [], streamingMessage: undefined });
@@ -140,13 +140,13 @@ describe("Pi 1.0.0 session view runtime tracking", () => {
   });
 
   it("rejects incompatible shared state without replacing it or wrapping methods", () => {
-    for (const value of [{ schema: "unknown" }, { schema: "pi-subagents.session-view-tracking.pi-1.0.0/v1", revision: 0, disposed: false }]) {
+    for (const value of [{ schema: "unknown" }, { schema: "pi-subagents.session-view-tracking.pi-1.1.0/v1", revision: 0, disposed: false }]) {
       const { raw, session } = fake();
-      const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.0.0");
+      const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.1.0");
       Object.defineProperty(session, key, { value });
       const emit = raw._emit;
       expect(installSessionViewTracking(session)).toBe(false);
-      expect(() => subscribeSessionView(session, () => {})).toThrow("supported Pi 1.0.0");
+      expect(() => subscribeSessionView(session, () => {})).toThrow("supported Pi 1.1.0");
       expect(raw._emit).toBe(emit);
       expect(Object.getOwnPropertyDescriptor(session, key)?.value).toBe(value);
     }
@@ -186,14 +186,14 @@ describe("Pi 1.0.0 session view runtime tracking", () => {
     raw._emit({ type: "tool_execution_start", toolCallId: "a", toolName: "test", args });
     args.nested.push(2);
     expect(snapshot().tools[0].args).toEqual({ nested: [1] });
-    raw._emit({ type: "tool_execution_end", toolCallId: "a", toolName: "test", result: { content: null, details: {} }, isError: false } as unknown as AgentSessionEvent);
-    expect(snapshot().tools[0]).toMatchObject({ complete: true, result: { content: [] } });
+    raw._emit({ type: "tool_execution_end", toolCallId: "a", toolName: "test", result: { content: null, details: {} }, isError: false, durationMs: 1234 } as unknown as AgentSessionEvent);
+    expect(snapshot().tools[0]).toMatchObject({ complete: true, durationMs: 1234, result: { content: [] } });
     raw._emit({ type: "message_end", message: { role: "toolResult", toolCallId: "a", toolName: "test", content: [], isError: false, timestamp: 2 } });
     expect(snapshot().tools).toEqual([]);
     expect(snapshot().pendingMessages).toHaveLength(1);
     raw._emit({ type: "message_start", message: { ...message, content: null } } as unknown as AgentSessionEvent);
     expect(snapshot().streamingMessage?.content).toEqual([]);
-    raw._emit({ type: "agent_settled" });
+    raw._emit({ type: "agent_settled", aborted: false });
     expect(snapshot()).toMatchObject({ streamingMessage: undefined, tools: [], pendingMessages: [] });
   });
 

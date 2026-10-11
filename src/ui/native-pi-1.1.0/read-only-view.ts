@@ -121,7 +121,7 @@ export class ReadOnlySessionView extends VStack {
     if (data.includes("\u001b[200~") || data.includes("\u001b[201~")) return;
     const keys = this.host.keybindings;
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q") { this.back(); return; }
-    // 1.0.0 has no app.sessionView actions: use configurable native navigation actions.
+    // 1.1.0 has no app.sessionView actions: use configurable native navigation actions.
     if (keys.matches(data, "tui.select.up") || keys.matches(data, "tui.altScreen.lineUp")) this.scrollView.scrollBy(-1);
     else if (keys.matches(data, "tui.select.down") || keys.matches(data, "tui.altScreen.lineDown")) this.scrollView.scrollBy(1);
     else if (keys.matches(data, "tui.altScreen.pageUp")) this.scrollView.scrollBy(-Math.max(1, this.scrollView.viewportHeight - 1));

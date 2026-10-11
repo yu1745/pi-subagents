@@ -7,10 +7,10 @@ import { userSteerBroker, userSteerStatus } from "../user-steer.js";
 import { type AgentActivity, getDisplayName } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 import { ForceSteerComposer, type ForceSteerOptions } from "./force-steer-composer.js";
-import { getNativeSessionViewUnavailableReason } from "./native-pi-1.0.0/index.js";
-import type { ReadOnlySessionViewOptions } from "./native-pi-1.0.0/read-only-view.js";
+import { getNativeSessionViewUnavailableReason } from "./native-pi-1.1.0/index.js";
+import type { ReadOnlySessionViewOptions } from "./native-pi-1.1.0/read-only-view.js";
 
-/** Local optional API installed by this plugin's exact Pi 1.0.0 runtime patch. */
+/** Local optional API installed by this plugin's exact Pi 1.1.0 runtime patch. */
 export interface SessionViewUI {
   notify(message: string, type?: "info" | "warning" | "error"): void;
   viewSession?(session: AgentSession, options?: ReadOnlySessionViewOptions & { signal?: AbortSignal }): Promise<void>;

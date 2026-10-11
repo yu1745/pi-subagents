@@ -13,6 +13,7 @@ export interface SessionViewTool {
   result?: ToolResult;
   isError?: boolean;
   complete?: boolean;
+  durationMs?: number;
 }
 
 /** Read-only by contract; opaque extension details are deliberately not cloned. */
@@ -35,8 +36,8 @@ type Internals = {
 type Registration = { listener: SessionViewEventListener };
 // Jiti can evaluate this module separately for each extension. The actual session
 // owns the state; neither module identity nor a prototype-global patch is involved.
-const stateKey = Symbol.for("pi-subagents.session-view-tracking.pi-1.0.0");
-const stateSchema = "pi-subagents.session-view-tracking.pi-1.0.0/v1";
+const stateKey = Symbol.for("pi-subagents.session-view-tracking.pi-1.1.0");
+const stateSchema = "pi-subagents.session-view-tracking.pi-1.1.0/v1";
 
 function getState(session: AgentSession): ViewState | undefined {
   const descriptor = Object.getOwnPropertyDescriptor(session, stateKey);
@@ -78,7 +79,7 @@ class ViewState {
   pending = new Set<AgentMessage>();
   tools = new Map<string, SessionViewTool>();
   listeners = new Set<Registration>();
-  // v1.0.0 appends custom entries before emitting, without associating appMessage.
+  // v1.1.0 appends custom entries before emitting, without associating appMessage.
   custom = new Set<AgentMessage>();
 
   clear(): void {
@@ -124,13 +125,13 @@ class ViewState {
         args: event.type === "tool_execution_end" ? previous?.args : copyArguments(event.args), started: true,
         ...(event.type === "tool_execution_update" ? { partialResult: copyResult(event.partialResult) } : {}),
         ...(event.type === "tool_execution_end"
-          ? { result: copyResult(event.result), isError: event.isError, complete: true } : {}),
+          ? { result: copyResult(event.result), isError: event.isError, durationMs: event.durationMs, complete: true } : {}),
       });
     } else if (event.type === "agent_end" || event.type === "agent_settled") this.clear();
   }
 }
 
-/** Pi 1.0.0 only. Install on the actual session before its first prompt. */
+/** Pi 1.1.0 only. Install on the actual session before its first prompt. */
 export function installSessionViewTracking(session: AgentSession): boolean {
   const existing = getState(session);
   if (existing) return !existing.disposed;
@@ -206,7 +207,7 @@ export function subscribeSessionView(session: AgentSession, listener: SessionVie
   let state = getState(session);
   if (!state) {
     if (!installSessionViewTracking(session)) {
-      throw new Error("Session view requires an idle, supported Pi 1.0.0 session tracked before running");
+      throw new Error("Session view requires an idle, supported Pi 1.1.0 session tracked before running");
     }
     state = getState(session)!;
   }
