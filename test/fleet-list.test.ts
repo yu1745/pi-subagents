@@ -51,6 +51,9 @@ function plain(row: string): string {
 
 /** A no-op session so a record is "openable" by default (the list hides session-less agents). */
 const FAKE_SESSION = { subscribe: () => () => {}, messages: [] };
+// Equal defaults keep navigation fixtures stable across clock ticks. Ordering
+// tests supply distinct start times explicitly.
+const FIXTURE_STARTED_AT = Date.now();
 
 function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
   return {
@@ -59,7 +62,7 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
     description: "Sleep then report 1",
     status: "running",
     toolUses: 0,
-    startedAt: Date.now(),
+    startedAt: FIXTURE_STARTED_AT,
     session: FAKE_SESSION as any,
     lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0 },
     compactionCount: 0,
@@ -435,7 +438,7 @@ describe("FleetList rendering", () => {
     expect(agentLine).toMatch(/\d+s · ↓/); // "<seconds>s · ↓ ..." (timing-agnostic)
   });
 
-  it("orders agents earliest-launched first (top)", () => {
+  it("orders agents newest-launched first (top)", () => {
     const agents = [
       makeRecord({ id: "new", description: "newest", startedAt: 2000 }),
       makeRecord({ id: "old", description: "oldest", startedAt: 1000 }),
@@ -444,7 +447,37 @@ describe("FleetList rendering", () => {
     const oldIdx = lines.findIndex(l => l.includes("oldest"));
     const newIdx = lines.findIndex(l => l.includes("newest"));
     expect(oldIdx).toBeGreaterThanOrEqual(0);
-    expect(oldIdx).toBeLessThan(newIdx); // earliest sits above the later one
+    expect(newIdx).toBeGreaterThanOrEqual(0);
+    expect(newIdx).toBeLessThan(oldIdx); // latest start sits above the earlier one
+  });
+
+  it("keeps start-time order across completion, viewing and a resumed start without jobs", async () => {
+    const old = makeRecord({ id: "old", description: "oldest", startedAt: 1000 });
+    const recent = makeRecord({ id: "recent", description: "recent", startedAt: 2000, status: "queued" });
+    const h = harness([old, recent]);
+    const order = () => h.render().filter(line => /oldest|recent/.test(line)).map(line => line.includes("oldest") ? "old" : "recent");
+    expect(order()).toEqual(["recent", "old"]);
+    old.status = "completed";
+    old.completedAt = Date.now();
+    h.fleet.update();
+    expect(order()).toEqual(["recent", "old"]);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); h.press(ENTER);
+    await flushViews();
+    await h.closeOverlay();
+    expect(old.startedAt).toBe(1000);
+    expect(order()).toEqual(["recent", "old"]);
+    // Manager.resume/startResume updates startedAt only when the run starts.
+    old.status = "running";
+    old.startedAt = 3000;
+    old.completedAt = undefined;
+    h.fleet.update();
+    expect(order()).toEqual(["old", "recent"]);
+    expect(h.render().find(line => line.includes("oldest"))).toContain("●");
+    old.status = "completed";
+    old.completedAt = Date.now();
+    h.fleet.update();
+    expect(order()).toEqual(["old", "recent"]);
+    h.fleet.dispose();
   });
 
   it("hides agents that have no session yet (pending)", () => {

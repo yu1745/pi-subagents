@@ -73,6 +73,78 @@ function harness(records: AgentRecord[], jobs: Job[]) {
 }
 
 describe("unified task tree", () => {
+  it("interleaves released owners by latest start and keeps workflows/jobs in their existing order", () => {
+    const records = [agent("old", { startedAt: 1000 }), agent("middle", { startedAt: 2000 }), agent("new", { startedAt: 3000, status: "queued" })];
+    const h = harness(records, [
+      { ...job("second", "middle"), startTime: 20 },
+      { ...job("first", "middle"), startTime: 10 },
+      { ...job("done", "new"), status: "completed" },
+    ]);
+    h.fleet.setWorkflowSource(() => [
+      { id: "wf-new", name: "workflow-new", status: "running", startedAt: 5000, tokens: 0, doneCount: 0, totalCount: 1 },
+      { id: "wf-old", name: "workflow-old", status: "running", startedAt: 500, tokens: 0, doneCount: 0, totalCount: 1 },
+    ], () => {});
+    const expectOrder = (expected: string[]) => {
+      h.select("main");
+      for (const label of expected) {
+        h.press(DOWN);
+        expect(h.lines().find(line => line.includes("●"))).toContain(label);
+      }
+    };
+    expectOrder(["workflow-old", "workflow-new", "Agent-new", "Completed (1)", "Agent-middle", "command-first", "command-second", "Agent-old"]);
+    records.splice(1, 2); // Both a middle and newest owner survive only through logs.
+    h.fleet.update();
+    expectOrder(["workflow-old", "workflow-new", "Agent-new (session released)", "Completed (1)", "Agent-middle (session released)", "command-first", "command-second", "Agent-old"]);
+    h.select("Agent-middle"); h.press(LEFT);
+    h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-old");
+    h.select("Agent-middle"); h.press(RIGHT); h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("command-first");
+    h.select("Completed"); h.press(RIGHT); h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("command-done");
+    h.select("Agent-new"); h.press("x"); h.press("\u001b[115;7u");
+    expect(h.manager.abort).not.toHaveBeenCalled();
+    expect(h.manager.steer).not.toHaveBeenCalled();
+    expect(h.native.viewSession).not.toHaveBeenCalled();
+  });
+
+  it("moves a resumed owner to the top, retaining selection/folds and its last start after GC", () => {
+    const old = agent("old", { startedAt: 1000 });
+    const recent = agent("recent", { startedAt: 2000 });
+    const records = [old, recent];
+    const h = harness(records, [job("owned", "old")]);
+    h.select("main"); h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-recent");
+    h.select("Agent-old"); h.press(LEFT);
+    old.status = "completed"; old.completedAt = Date.now();
+    h.fleet.update();
+    h.select("main"); h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-recent");
+    // A queued continuation retains the last start until actual dispatch.
+    old.status = "queued"; old.completedAt = undefined;
+    h.fleet.update();
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-recent");
+    old.status = "running"; old.startedAt = 3000;
+    h.fleet.update();
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-recent");
+    h.select("main"); h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-old");
+    expect(h.lines().join("\n")).not.toContain("command-owned");
+    h.press(RIGHT);
+    expect(h.lines().join("\n")).toContain("command-owned");
+    old.status = "completed"; old.completedAt = Date.now();
+    h.fleet.update();
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-old");
+    records.splice(0, 1);
+    h.fleet.update();
+    h.select("main"); h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-old (session released)");
+    h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("command-owned");
+    h.press(DOWN);
+    expect(h.lines().find(line => line.includes("●"))).toContain("Agent-recent");
+  });
+
   it("keeps short child commands in Completed without changing the tree height", () => {
     vi.useFakeTimers();
     vi.setSystemTime(1000);

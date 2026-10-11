@@ -73,7 +73,7 @@ type AgentEntry = { kind: "agent"; record: AgentRecord };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
 type JobEntry = { kind: "job"; job: Job; depth: number };
 type GroupEntry = { kind: "group"; id: string; label: string; depth: number };
-type OwnerEntry = { kind: "owner"; id: string; description: string };
+type OwnerEntry = { kind: "owner"; id: string; description: string; startedAt: number };
 type FleetEntry = MainEntry | WorkflowEntry | AgentEntry | JobEntry | GroupEntry | OwnerEntry;
 
 function entryKey(entry: FleetEntry): string {
@@ -144,7 +144,7 @@ export class FleetList {
   private viewingWorkflowId: string | undefined;
   private jobs: BackgroundRegistry | undefined;
   private rootSessionId: (() => string | undefined) | undefined;
-  private knownOwners = new Map<string, string>();
+  private knownOwners = new Map<string, Pick<AgentRecord, "description" | "startedAt">>();
   private collapsed = new Set<string>();
   private expandedCompleted = new Set<string>();
   private viewingJobId: string | undefined;
@@ -279,12 +279,12 @@ export class FleetList {
   // ---- Roster ----
 
   /**
-   * Agents shown in the list, ordered earliest-launched first so the ones you
-   * started sooner sit at the top. Every row is openable (has a session), so Enter
+   * Agents shown in the list, ordered newest-launched first so the ones you
+   * started most recently sit at the top. Every row is openable (has a session), so Enter
    * never dead-ends. Included: running/queued, plus the agent currently being
    * viewed, plus recently-finished ones (they linger briefly before dropping out).
    * Pending agents with no session yet are hidden until they start.
-   * (`listAgents()` is newest-first, so we re-sort.)
+   * Sort explicitly by latest start/resume time, independent of completion state.
    */
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
@@ -294,7 +294,7 @@ export class FleetList {
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
       ))
-      .sort((a, b) => a.startedAt - b.startedAt);
+      .sort((a, b) => b.startedAt - a.startedAt);
   }
 
   /**
@@ -336,7 +336,7 @@ export class FleetList {
     // Only owners already visible in this scope may introduce job rows. Never
     // infer visibility from the all-jobs store or turn an unknown owner into main.
     const records = this.manager.listAgents().filter(isTopLevelAgent);
-    for (const record of records) this.knownOwners.set(record.id, record.description);
+    for (const record of records) this.knownOwners.set(record.id, { description: record.description, startedAt: record.startedAt });
     const jobs = this.jobs && !this.jobs.disposed ? [...this.jobs.jobs.values()].filter(job =>
       job.ownerAgentId ? this.knownOwners.has(job.ownerAgentId)
         : job.ownerSessionId === this.rootSessionId?.(),
@@ -362,18 +362,20 @@ export class FleetList {
     if (!ignoreCollapse && this.collapsed.has("main")) return entries;
     entries.push(...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })));
     const visible = this.jobs ? records.filter(record => record.session || record.status === "running" || record.status === "queued" || jobs.some(job => job.ownerAgentId === record.id))
-      .sort((a, b) => a.startedAt - b.startedAt) : this.agentRecords();
-    for (const record of visible) {
-      entries.push({ kind: "agent", record });
-      if (ignoreCollapse || !this.collapsed.has(`agent:${record.id}`)) addJobs(record.id, 2);
-    }
-    // Keep only a label for evicted owners, not a retained AgentSession. Logs
-    // outlive agent GC, but never gain a new steering/execution capability.
-    for (const [id, description] of this.knownOwners) {
+      : this.agentRecords();
+    const owners: (AgentEntry | OwnerEntry)[] = visible.map(record => ({ kind: "agent", record }));
+    // Retain only label/start metadata, never an AgentSession or execution
+    // capability. Released owners keep their place among ordinary agents.
+    for (const [id, metadata] of this.knownOwners) {
       if (!records.some(record => record.id === id) && jobs.some(job => job.ownerAgentId === id)) {
-        entries.push({ kind: "owner", id, description });
-        if (ignoreCollapse || !this.collapsed.has(`owner:${id}`)) addJobs(id, 2);
+        owners.push({ kind: "owner", id, ...metadata });
       }
+    }
+    owners.sort((a, b) => (b.kind === "agent" ? b.record.startedAt : b.startedAt)
+      - (a.kind === "agent" ? a.record.startedAt : a.startedAt));
+    for (const owner of owners) {
+      entries.push(owner);
+      if (ignoreCollapse || !this.collapsed.has(entryKey(owner))) addJobs(owner.kind === "agent" ? owner.record.id : owner.id, 2);
     }
     addJobs(undefined, 1);
     return entries;
