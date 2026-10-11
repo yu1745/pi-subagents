@@ -95,8 +95,12 @@ export class ResumeStore {
         fsyncSync(fd);
       } finally { closeSync(fd); }
       renameSync(temp, this.path);
-      const directory = openSync(dir, "r");
-      try { fsyncSync(directory); } finally { closeSync(directory); }
+      // Windows cannot fsync directory handles (EPERM). The temporary FILE
+      // is still flushed before atomic rename; do not swallow file I/O errors.
+      if (process.platform !== "win32") {
+        const directory = openSync(dir, "r");
+        try { fsyncSync(directory); } finally { closeSync(directory); }
+      }
       this.entries = next;
     } catch (error) {
       try { unlinkSync(temp); } catch { /* no temporary file or already renamed */ }

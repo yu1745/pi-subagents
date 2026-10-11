@@ -37,6 +37,7 @@ interface MonitorParams {
 }
 
 export function registerMonitorTool(pi: ExtensionAPI, reg: BackgroundRegistry): void {
+    const shell = process.platform === "win32" ? "PowerShell 7" : "bash";
     pi.registerTool({
         name: "monitor",
         label: "Monitor",
@@ -44,10 +45,11 @@ export function registerMonitorTool(pi: ExtensionAPI, reg: BackgroundRegistry): 
             "Stream events from a long-running process: each stdout line (or WebSocket " +
             "text frame) becomes one notification, delivered while you keep working. " +
             "Use this for per-event streams — NOT for one-shot 'wait until done' (use " +
-            "bash run_in_background for that). Exit ends the watch.",
+            `${process.platform === "win32" ? "powershell" : "bash"} run_in_background for that). Commands run in ${shell}. Exit ends the watch.`,
         promptSnippet:
             "Stream per-event notifications from a process, log, poll loop, or WebSocket",
         promptGuidelines: [
+            `Command scripts run in ${shell}. On Windows use PowerShell syntax (Write-Output, Start-Sleep); do not submit bash syntax. Unix pipeline examples below apply only to Unix.`,
             "Pick by notification count: ONE ('tell me when done') → bash run_in_background with an `until` loop that exits; ONE-PER-EVENT → monitor.",
             "Don't use an unbounded command (tail -f, while true, inotifywait -m) for a single notification — it never exits and stays armed until timeout.",
             "Every pipe stage must flush per line: grep needs --line-buffered, awk needs fflush(); never pipe to `head` (it buffers until N matches).",
@@ -59,7 +61,7 @@ export function registerMonitorTool(pi: ExtensionAPI, reg: BackgroundRegistry): 
         ],
         parameters: Type.Object({
             command: Type.Optional(
-                Type.String({ description: "Shell script; each stdout line is an event. Mutually exclusive with ws." })
+                Type.String({ description: `${shell} script; each stdout line is an event. Mutually exclusive with ws.` })
             ),
             ws: Type.Optional(
                 Type.Object(

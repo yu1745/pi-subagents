@@ -49,11 +49,15 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 pi install npm:@tintinweb/pi-subagents
 ```
 
-Or load directly for development:
+Normal package installs load the checked-in `bundle/index.js`: one precompiled module instead of traversing and transpiling the TypeScript source tree at every startup. Pi SDKs and runtime dependencies remain external, so the host retains its own SDK instances. Git installs need no build tools or install-time compilation.
+
+Load the source directly for development:
 
 ```bash
 pi -e ./src/index.ts
 ```
+
+After source changes, run `npm run build:bundle` and include the updated bundle in the same commit. `npm run check:bundle` (also part of `npm run check` and CI) rejects a stale or missing bundle. `npm run build` compiles the separate `dist/` files and rebuilds the installed bundle. Keep source and bundled startup measurements separate: the source entry intentionally retains the development loading path.
 
 **The native viewer patch targets exactly Pi 1.1.0, not 1.1.0 or newer.** Native child viewing is installed at plugin activation by a process-local monkey patch of private Pi internals; it is **not a stable public SDK API** or a multi-version compatibility layer. A version mismatch or unavailable/failed native view falls back to the existing `ConversationViewer` overlay. On other Pi versions this works only if the plugin otherwise loads and operates. The `>=1.0.0` peer dependency range permits installation for the legacy path; it does not promise cross-version native support. A host still running Pi 1.0.0 uses the legacy viewer, not this native patch. Its native-only parent-session access is unavailable, including queued-agent force steering and child/direct-parent forwarding. Development dependencies are pinned to 1.1.0; updating this plugin does not update the host Pi installation. The upstream npm command above does not imply that this fork's changes have been published or tagged.
 
@@ -97,7 +101,7 @@ Then ask the model to call `Agent` with `resume: "<original-agent-id>"`, or type
 
 Cold resume keeps the stored type, execution/config directories and isolation restrictions. It loads the current definition's prompt, tools and extensions, while Pi restores conversation model/thinking state from the session (subject to SDK model-availability fallback). Caller type/model/isolation overrides are ignored on resume; unavailable or disabled stored types are errors, not fallback spawns.
 
-The resume index is `subagents/<parent-session-id>/resume-registry.json` beside the parent's session file. It records child session paths and IDs plus execution metadata; the child JSONL session remains the conversation source of truth. Writes are atomic and owner-only. Registry/session errors are reported instead of silently starting an empty conversation. A missing, corrupt or mismatched child session, unavailable agent type, or vanished execution directory/worktree is refused. A completed worktree agent normally cannot resume because its worktree was removed; start a new agent against its saved branch instead.
+The resume index is `subagents/<parent-session-id>/resume-registry.json` beside the parent's session file. It records child session paths and IDs plus execution metadata; the child JSONL session remains the conversation source of truth. Writes are atomic and owner-only. Registry/session errors are reported instead of silently starting an empty conversation. Registry writes flush the temporary file before atomic replacement on all platforms; directory `fsync` is POSIX-only because Windows rejects it. Windows relies on inherited directory ACLs rather than Unix mode-bit guarantees. A missing, corrupt or mismatched child session, unavailable agent type, or vanished execution directory/worktree is refused. A completed worktree agent normally cannot resume because its worktree was removed; start a new agent against its saved branch instead.
 
 **Pod restarts require persistent storage:** mount the parent session directory, child session directories (including any `session_dir` override), project/config files and required working directories at the **same absolute paths** in the new Pod. Pi's default session files live under `$PI_CODING_AGENT_DIR/sessions` (normally `~/.pi/agent/sessions`). The `.output` files under `/tmp` are optional display transcripts, not resume storage. Keep only **one active Pi writer per parent session**; concurrent Pods sharing one parent/index are not supported.
 
@@ -1044,9 +1048,12 @@ examples/
   workflows/          # Runnable examples, executed by test/workflow-examples.test.ts
   agent-tool-description.md
 test/                 # vitest suite; e2e/ and perf/ subdirectories
+bundle/index.js       # Generated install entry; checked in for build-free git installs
+scripts/build-extension.mjs # Reproducible bundle generation / freshness check
 src/
   index.ts            # Extension entry: tool/command registration, /agents menu, rendering
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
+  package-info.ts     # Package metadata path shared by source, dist and bundle
 
   # Agent registry
   default-agents.ts   # Embedded default agent configs (general-purpose, Explore, Plan)

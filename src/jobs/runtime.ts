@@ -1,5 +1,5 @@
 import type { AgentSession, ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, createPowerShellToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { registerCommands } from "./patty/commands.js";
 import { registerInputHandlers } from "./patty/input.js";
@@ -235,6 +235,7 @@ export class JobRuntime {
     const reg = owner.registry;
     reg.watchdog = this.registry.watchdog;
     registerBashTool(scopedPi, reg, createBashToolDefinition(process.cwd()));
+    if (process.platform === "win32") registerBashTool(scopedPi, reg, createPowerShellToolDefinition(process.cwd()), "powershell");
     registerBashBgTool(scopedPi, reg);
     registerJobsTool(scopedPi, reg);
     registerMonitorTool(scopedPi, reg);

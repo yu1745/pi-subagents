@@ -18,6 +18,7 @@ import type {
 import {
     type BashToolDetails,
     createBashToolDefinition,
+    createPowerShellToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { textBlock } from "../format.js";
 import { clearBackgroundHint, showBackgroundHint } from "../hint.js";
@@ -39,6 +40,7 @@ import {
     newJobId,
     readLogTail,
 } from "../registry.js";
+import type { JobShell } from "../shell-command.js";
 import { killProcessTree, type SpawnExit, spawnWithFileOutput } from "../spawn.js";
 import type { BackgroundRegistry } from "../state.js";
 import {
@@ -59,21 +61,22 @@ type BashCtx = UiContext & { cwd: string };
 export function registerBashTool(
     pi: ExtensionAPI,
     reg: BackgroundRegistry,
-    originalBash: ReturnType<typeof createBashToolDefinition>
+    originalBash: ReturnType<typeof createBashToolDefinition> | ReturnType<typeof createPowerShellToolDefinition>,
+    shell: JobShell = "bash",
 ): void {
     pi.registerTool({
         ...originalBash,
         // The SDK's synchronous output schema cannot represent a job handoff.
         outputSchema: undefined,
-        name: "bash",
+        name: shell,
         description:
-            "Run a bash command. Long-running commands auto-background after timeout. " +
+            `Run a ${shell === "powershell" ? "PowerShell 7" : "bash"} command. Long-running commands auto-background after timeout. ` +
             "Set run_in_background=true to start in background immediately. " +
             "Use /bg to manually background a running command.",
         promptSnippet:
-            "Run shell commands; long-running commands auto-background or use run_in_background=true",
+            `Run ${shell} commands; long-running commands auto-background or use run_in_background=true`,
         promptGuidelines: [
-            "Use bash with run_in_background=true when a command is expected to run for a long time.",
+            `Use ${shell} with run_in_background=true when a command is expected to run for a long time.`,
             "run_in_background is for ONE notification (the command exits when done). For per-event streaming (watching logs, polling an API, file changes), use the monitor tool instead.",
             "For waits, prefer jobs action='attach' or a condition-based monitor when those express the real completion condition; explicit finite sleep commands remain allowed.",
             "Check background job status with jobs action='list'.",
@@ -104,6 +107,7 @@ export function registerBashTool(
                 return spawnBackground({
                     toolCallId,
                     command: p.command,
+                    shell,
                     name: p.description,
                     cwd: bashCtx.cwd,
                     reg,
@@ -116,6 +120,7 @@ export function registerBashTool(
             return runForeground({
                 toolCallId,
                 command: p.command,
+                shell,
                 timeoutMs: p.timeout === undefined ? DEFAULT_TIMEOUT_MS : p.timeout * 1000,
                 signal,
                 onUpdate,
@@ -132,6 +137,7 @@ export function registerBashTool(
 async function runForeground(args: {
     toolCallId: string;
     command: string;
+    shell: JobShell;
     timeoutMs: number;
     signal: AbortSignal | undefined;
     onUpdate: AgentToolUpdateCallback<BashToolDetails | undefined> | undefined;
@@ -151,6 +157,7 @@ async function runForeground(args: {
     // foreground process with bounded escalation.
     const spawned = spawnWithFileOutput({
         command,
+        shell: args.shell,
         cwd: ctx.cwd,
         logPath,
         foreground: true,
@@ -325,6 +332,7 @@ async function runForeground(args: {
 function spawnBackground(args: {
     toolCallId: string;
     command: string;
+    shell: JobShell;
     name?: string;
     cwd: string;
     reg: BackgroundRegistry;
@@ -336,6 +344,7 @@ function spawnBackground(args: {
 
     const spawned = spawnWithFileOutput({
         command: args.command,
+        shell: args.shell,
         cwd: args.cwd,
         logPath,
     });

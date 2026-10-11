@@ -12,6 +12,14 @@ Do not reload/uninstall a provider holding live tasks. Existing sessions can fin
 
 Eligible non-isolated child sessions receive the same service through an explicit inline extension, not a second standalone registry or a global lookup. `extensions: false`, isolated agents, and extension/tool filters remain authoritative. The extension names `pi-subagents-jobs` and `pi-patty-bg-tasks` identify this surface for filtering. If omitted, their normal tools and queue semantics remain in force.
 
+## Windows / PowerShell 7
+
+On Windows the owned runtime also wraps Pi's `powershell` tool. It requires **PowerShell 7 (`pwsh.exe`)**, supports foreground execution, `run_in_background: true`, automatic/manual backgrounding, and the same `jobs` inspection and cancellation controls. Command monitors use PowerShell 7 syntax on Windows; Bash syntax is not translated. Missing pwsh is an explicit error, never a fallback to WSL or Windows PowerShell 5. No shell is started just to discover its path.
+
+PowerShell commands run without a new console, with UTF-8 output. Before user code runs, the shell joins a Windows Job Object with kill-on-close; stopping or exiting that shell also terminates ordinary descendants. If Job Object setup fails, the command fails rather than running without containment. This does not contain work handed off to an external service or another already-running process. Direct `agent_bg` and the Bash backend are not upgraded to this PowerShell containment path in this change.
+
+Use `powershell({ command: "...", run_in_background: true })` for background PowerShell work. Do not use `bash_bg` for PowerShell scripts. Windows integration tests are `test/windows-powershell.test.ts`; run them explicitly instead of the Unix shell suites, which can invoke a system WSL launcher.
+
 ## Ownership and controls
 
 One activation owns a shared job store. Each job records the owning agent, session, working directory, process capability and capture paths. Main can inspect/control all jobs; a child can inspect/control only its own. Foreground wait slots are owner-scoped: steering main cannot release a child's wait and vice versa. The shared running-job cap is 16.

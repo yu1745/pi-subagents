@@ -3,6 +3,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, constants, lstatSync, mkdirSync, openSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
+import { type JobShell, shellCommand } from "./shell-command.js";
 import { supervisorSource } from "./spawn-supervisor.js";
 
 /** How the child ended: an exit code, or the signal that killed it. Node
@@ -37,6 +38,7 @@ export interface SpawnResult {
  */
 export function spawnWithFileOutput(args: {
     command?: string;
+    shell?: JobShell;
     file?: string;
     fileArgs?: string[];
     cwd: string;
@@ -48,6 +50,8 @@ export function spawnWithFileOutput(args: {
     signal?: AbortSignal;
     foreground?: boolean;
 }): SpawnResult {
+    const launch = args.file ? { file: args.file, fileArgs: args.fileArgs ?? [] }
+        : shellCommand(args.command ?? "", args.shell ?? "bash");
     ensureLogDir(args.logPath);
     const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
     const outFd = openSync(args.logPath, flags, 0o600);
@@ -60,13 +64,9 @@ export function spawnWithFileOutput(args: {
         throw err;
     }
 
-    const [bin, binArgs]: [string, string[]] = args.file
-        ? [args.file, args.fileArgs ?? []]
-        : ["bash", ["-c", args.command ?? ""]];
-
     let proc: ReturnType<typeof spawnSupervisedProcess>;
     try {
-        proc = spawnSupervisedProcess({ file: bin, fileArgs: binArgs, cwd: args.cwd, stdout: outFd, stderr: errFd });
+        proc = spawnSupervisedProcess({ ...launch, cwd: args.cwd, stdout: outFd, stderr: errFd });
     } finally {
         closeSync(outFd);
         if (errFd !== outFd) closeSync(errFd);
@@ -159,7 +159,8 @@ export function spawnSupervisedProcess(args: {
         supervised ? ["-e", supervisorSource, JSON.stringify([args.file, args.fileArgs])] : args.fileArgs, {
             stdio: supervised ? ["ignore", args.stdout, args.stderr, "ipc"] : ["ignore", args.stdout, args.stderr],
             cwd: args.cwd,
-            detached: true,
+            detached: supervised,
+            windowsHide: true,
             env: { ...process.env },
         });
     const identity = retainProcessIdentity(proc, supervised);

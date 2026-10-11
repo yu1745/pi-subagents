@@ -9,16 +9,15 @@
 
 import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import type {
     ExtensionAPI,
     ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import { packageJsonPath } from "../../package-info.js";
 import { type ControlContext, takeControl } from "./lifecycle.js";
 import type { BackgroundRegistry } from "./state.js";
 import { openBgListPanel } from "./ui.js";
 
-const packageJsonPath = fileURLToPath(new URL("../../../package.json", import.meta.url));
 const packageRoot = dirname(packageJsonPath);
 
 /** Register all slash commands. */

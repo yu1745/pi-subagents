@@ -11,6 +11,7 @@
 
 import { openMonitorCapture } from "./monitor-capture.js";
 import { openWsSource, type WsSpec } from "./monitor-ws.js";
+import { shellCommand } from "./shell-command.js";
 import { killProcessTree, type ProcessIdentity, type SpawnExit, spawnSupervisedProcess } from "./spawn.js";
 
 export interface MonitorSource {
@@ -35,6 +36,7 @@ export function spawnCommandSource(args: {
     logPath: string;
     errPath: string;
 }): MonitorSource {
+    const launch = shellCommand(args.command, process.platform === "win32" ? "powershell" : "bash");
     const out = openMonitorCapture(args.logPath);
     let err: ReturnType<typeof openMonitorCapture>;
     try { err = openMonitorCapture(args.errPath); }
@@ -42,7 +44,7 @@ export function spawnCommandSource(args: {
     let proc: ReturnType<typeof spawnSupervisedProcess>;
     try {
         proc = spawnSupervisedProcess({
-            file: "bash", fileArgs: ["-c", args.command], cwd: args.cwd,
+            ...launch, cwd: args.cwd,
             stdout: "pipe", stderr: "pipe",
         });
     } catch (error) { out.close(); err.close(); throw error; }
