@@ -632,7 +632,7 @@ export class FleetList {
     const sel = stable >= 0 ? stable : Math.min(this.selectedIndex, rows.length);
 
     const selected = this.roster()[sel];
-    const hint = this.confirmation ? `${this.confirmation.action === "clean" ? "Remove task and logs" : this.confirmation.entry.kind === "agent" ? "Stop Agent and its owned tasks/descendants" : "Stop bash process group ONLY (Agent continues)"}: ${safeLabel(this.confirmation.entry.kind === "agent" ? this.confirmation.entry.record.description : this.confirmation.entry.job.id)}? Enter/y confirm · Esc/n cancel`
+    const hint = this.confirmation ? `${this.confirmation.action === "clean" ? "Remove task and logs" : this.confirmation.entry.kind === "agent" ? "Stop Agent and its owned tasks/descendants" : "Stop shell process tree ONLY (Agent continues)"}: ${safeLabel(this.confirmation.entry.kind === "agent" ? this.confirmation.entry.record.description : this.confirmation.entry.job.id)}? Enter/y confirm · Esc/n cancel`
       : this.actionPending ? "Task action in progress…"
       : this.active
         ? `↑↓ select · enter view${this.jobs ? " · ←→ fold · x stop · d clean" : ""}${this.manager.hasJobRuntime && selected?.kind === "agent" ? " · Ctrl+Alt+S force steer" : ""} · esc back`
@@ -667,7 +667,7 @@ export class FleetList {
     if (row.kind === "job") {
       const job = row.job;
       const colour = job.status === "failed" || job.status === "killed" ? "error" : job.status === "completed" ? "success" : "text";
-      const label = `${job.kind === "agent" ? "process" : job.kind === "monitor" ? "monitor" : "bash"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
+      const label = `${job.kind === "agent" ? "process" : job.kind === "monitor" ? "monitor" : job.shell ?? "shell"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
       const status = `${job.status}${job.exitCode !== undefined ? ` exit=${job.exitCode}` : ""} · ${formatFleetElapsed((job.endTime ?? Date.now()) - job.startTime)}`;
       return rightAlign(`${"  ".repeat(row.depth + 1)}${this.bullet(index, sel, theme)} ${label}`, theme.fg(colour, status), width);
     }

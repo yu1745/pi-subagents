@@ -1,17 +1,46 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createPowerShellToolDefinition } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnCommandSource } from "../src/jobs/patty/monitor-source.js";
+import { cleanupTerminal, stopSidebarTicker } from "../src/jobs/patty/registry.js";
 import { resolvePwsh } from "../src/jobs/patty/shell-command.js";
 import { killProcessTree, processExists, spawnWithFileOutput } from "../src/jobs/patty/spawn.js";
+import { BackgroundRegistry } from "../src/jobs/patty/state.js";
+import { registerBashTool } from "../src/jobs/patty/tools/bash.js";
 import { ResumeStore } from "../src/resume-store.js";
+import { jobHost } from "./helpers/job-runtime.js";
 
 // These tests launch only pwsh 7 / Node: never bash.exe, WSL or a model.
 describe.skipIf(process.platform !== "win32")("Windows PowerShell 7 jobs", () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "pi-pwsh-test-")); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it.each(["foreground", "background", "promoted"] as const)("retains the PowerShell label for %s execution and completion", async mode => {
+    const reg = new BackgroundRegistry();
+    reg.retainResults = true;
+    const host = jobHost(dir);
+    registerBashTool(host.pi, reg, createPowerShellToolDefinition(dir), "powershell");
+    const result = host.execute("powershell", { command: "Write-Output 'label-test'", run_in_background: mode === "background" }, "label-test");
+    const tracked = [...reg.jobs.values()][0];
+    try {
+      expect(tracked?.shell).toBe("powershell");
+      if (mode === "promoted") reg.foreground.get("label-test")!.requestPause("manual");
+      await result;
+      expect(tracked.isBackgrounded).toBe(mode !== "foreground");
+      await tracked.donePromise;
+      expect(reg.jobs.get(tracked.id)?.shell).toBe("powershell");
+      expect(tracked.status).toBe("completed");
+    } finally {
+      if (tracked) killProcessTree(tracked.identity, "SIGKILL");
+      await result;
+      await tracked?.donePromise;
+      stopSidebarTicker(reg);
+      cleanupTerminal(reg);
+    }
+  }, 20_000);
 
   it("requires pwsh rather than falling back to Windows PowerShell or WSL", () => {
     expect(resolvePwsh()).toMatch(/pwsh\.exe$/i);

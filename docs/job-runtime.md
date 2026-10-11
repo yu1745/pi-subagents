@@ -54,7 +54,7 @@ Streaming owners receive the notice inside their existing SDK prompt. Idle owner
 
 Running task rows appear after 500ms, on the next UI refresh. Faster commands go directly into the owner's Completed group without briefly adding a running row; their logs remain available by expanding the group. This delay affects presentation only.
 
-The integrated runtime uses one FleetView task tree below the editor. Main-session bash tasks are top-level rows under `main`; owned bash tasks nest under their visible Agent. Nested/workflow Agent visibility rules are unchanged: jobs do not create a back door into a hidden owner or another session. The tree itself does not change Agent/jobs tool APIs, execution, process ownership or steering; notification delivery follows the owner-only rule above.
+The integrated runtime uses one FleetView task tree below the editor. Main-session shell tasks are top-level rows under `main`; owned shell tasks nest under their visible Agent. Shell rows show the recorded launch shell (`powershell` or `bash`), not an OS-based guess, and use `shell` when metadata is absent. The label survives foreground-to-background promotion and completion. Monitor and external agent-process rows remain `monitor` and `process`. Nested/workflow Agent visibility rules are unchanged: jobs do not create a back door into a hidden owner or another session. The tree itself does not change Agent/jobs tool APIs, execution, process ownership or steering; notification delivery follows the owner-only rule above.
 
 | Key | Action |
 | --- | --- |
@@ -63,7 +63,7 @@ The integrated runtime uses one FleetView task tree below the editor. Main-sessi
 | `←` / `→`, `Space` | Collapse / expand, or toggle a node/Completed group. |
 | `Enter` | Agent: existing native Pi conversation view; bash: dedicated readonly log viewer; group: toggle. |
 | `Esc` | Return to the tree or prompt, without stopping work. |
-| `x` | Ask to stop the selected Agent and its owned tasks/descendants, or only the selected bash process group. `Enter`/`y` confirms; `Esc`/`n` cancels. |
+| `x` | Ask to stop the selected Agent and its owned tasks/descendants, or only the selected shell process tree (the Agent continues). `Enter`/`y` confirms; `Esc`/`n` cancels. |
 | `d` | Confirm removal of a selected terminal bash task and its captures. Running tasks cannot be removed. |
 | `Ctrl+Alt+S` on Agent | Existing scoped steer composer and direct-parent forwarding. Never a bash command input. |
 

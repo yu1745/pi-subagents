@@ -4,6 +4,7 @@
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
+import type { JobShell } from "./shell-command.js";
 import type { ProcessIdentity } from "./spawn.js";
 
 // --- Configuration constants ---
@@ -75,6 +76,8 @@ export interface Job {
     waiters?: number;
     name?: string;
     command: string;
+    /** Actual shell, recorded at launch rather than inferred from the OS. */
+    shell?: JobShell;
     pid: number;
     /** Present for every production spawned job; PID alone is display metadata. */
     identity?: ProcessIdentity;

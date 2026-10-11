@@ -73,6 +73,29 @@ function harness(records: AgentRecord[], jobs: Job[]) {
 }
 
 describe("unified task tree", () => {
+  it.each([
+    { kind: "shell", shell: "powershell", label: "powershell" },
+    { kind: "shell", shell: "bash", label: "bash" },
+    { kind: "shell", shell: undefined, label: "shell" },
+    { kind: undefined, shell: undefined, label: "shell" },
+    { kind: "agent", shell: "powershell", label: "process" },
+    { kind: "monitor", shell: "powershell", label: "monitor" },
+  ] satisfies { kind: Job["kind"]; shell: Job["shell"]; label: string }[])("labels $kind/$shell as $label in running and completed rows", ({ kind, shell, label }) => {
+    const j = { ...job("label"), kind, shell };
+    const h = harness([], [j]);
+    expect(h.lines().join("\n")).toContain(` ${label} command-label (label)`);
+    j.status = "completed";
+    h.fleet.update();
+    h.select("Completed"); h.press(RIGHT);
+    expect(h.lines().join("\n")).toContain(` ${label} command-label (label)`);
+  });
+
+  it("uses shell-neutral stop confirmation for PowerShell tasks", () => {
+    const h = harness([], [{ ...job("pwsh"), shell: "powershell" }]);
+    h.select("command-pwsh"); h.press("x");
+    expect(h.lines()[0]).toContain("Stop shell process tree ONLY (Agent continues): pwsh?");
+  });
+
   it("interleaves released owners by latest start and keeps workflows/jobs in their existing order", () => {
     const records = [agent("old", { startedAt: 1000 }), agent("middle", { startedAt: 2000 }), agent("new", { startedAt: 3000, status: "queued" })];
     const h = harness(records, [

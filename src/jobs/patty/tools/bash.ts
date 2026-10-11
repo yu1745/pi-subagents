@@ -189,6 +189,7 @@ async function runForeground(args: {
         toolCallId,
         isBackgrounded: false,
     });
+    job.shell = args.shell;
     // Foreground jobs are tracked for the sidebar / Ctrl+Shift+B but not counted
     // as "started" until they actually move to the background (see below).
     reg.jobs.set(id, job);
@@ -358,6 +359,7 @@ function spawnBackground(args: {
         logPath,
         toolCallId: args.toolCallId,
     });
+    job.shell = args.shell;
     add(args.reg, job);
     startBackgroundJob({ reg: args.reg, pi: args.pi, ctx: args.ctx, job, exit: spawned.exit });
 

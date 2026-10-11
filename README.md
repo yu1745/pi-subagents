@@ -172,7 +172,7 @@ Native transcript top/end follow Pi 1.1's configurable `Ctrl+Home`/`Ctrl+End` de
 
 While subagents are running, a Claude Code-style navigable list renders **below** the editor:
 
-Running task rows appear after 500ms, on the next UI refresh. Commands that finish sooner go directly into their owner's Completed group, avoiding a brief expansion for each short command. Logs remain available there.
+Running task rows appear after 500ms, on the next UI refresh. Commands that finish sooner go directly into their owner's Completed group, avoiding a brief expansion for each short command. Logs remain available there. Shell rows use the recorded launch shell (`powershell` or `bash`), falling back to `shell` when metadata is unavailable; monitor and external agent-process rows keep their own labels.
 
 ```
   esc to interrupt · ↓ tasks

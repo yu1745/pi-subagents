@@ -8370,6 +8370,7 @@ async function runForeground(args) {
     toolCallId,
     isBackgrounded: false
   });
+  job.shell = args.shell;
   reg.jobs.set(id, job);
   markStarted(reg);
   ensureCompletionPromise(job);
@@ -8493,6 +8494,7 @@ function spawnBackground(args) {
     logPath,
     toolCallId: args.toolCallId
   });
+  job.shell = args.shell;
   add(args.reg, job);
   startBackgroundJob({ reg: args.reg, pi: args.pi, ctx: args.ctx, job, exit: spawned.exit });
   return {
@@ -13352,7 +13354,7 @@ var FleetList = class {
     const stable = this.roster().findIndex((entry) => entryKey(entry) === this.selectedKey);
     const sel = stable >= 0 ? stable : Math.min(this.selectedIndex, rows.length);
     const selected = this.roster()[sel];
-    const hint = this.confirmation ? `${this.confirmation.action === "clean" ? "Remove task and logs" : this.confirmation.entry.kind === "agent" ? "Stop Agent and its owned tasks/descendants" : "Stop bash process group ONLY (Agent continues)"}: ${safeLabel(this.confirmation.entry.kind === "agent" ? this.confirmation.entry.record.description : this.confirmation.entry.job.id)}? Enter/y confirm \xB7 Esc/n cancel` : this.actionPending ? "Task action in progress\u2026" : this.active ? `\u2191\u2193 select \xB7 enter view${this.jobs ? " \xB7 \u2190\u2192 fold \xB7 x stop \xB7 d clean" : ""}${this.manager.hasJobRuntime && selected?.kind === "agent" ? " \xB7 Ctrl+Alt+S force steer" : ""} \xB7 esc back` : this.jobs ? "esc to interrupt \xB7 \u2193 tasks" : "esc to interrupt \xB7 \u2190 for agents \xB7 \u2193 to manage";
+    const hint = this.confirmation ? `${this.confirmation.action === "clean" ? "Remove task and logs" : this.confirmation.entry.kind === "agent" ? "Stop Agent and its owned tasks/descendants" : "Stop shell process tree ONLY (Agent continues)"}: ${safeLabel(this.confirmation.entry.kind === "agent" ? this.confirmation.entry.record.description : this.confirmation.entry.job.id)}? Enter/y confirm \xB7 Esc/n cancel` : this.actionPending ? "Task action in progress\u2026" : this.active ? `\u2191\u2193 select \xB7 enter view${this.jobs ? " \xB7 \u2190\u2192 fold \xB7 x stop \xB7 d clean" : ""}${this.manager.hasJobRuntime && selected?.kind === "agent" ? " \xB7 Ctrl+Alt+S force steer" : ""} \xB7 esc back` : this.jobs ? "esc to interrupt \xB7 \u2193 tasks" : "esc to interrupt \xB7 \u2190 for agents \xB7 \u2193 to manage";
     const lines = [];
     lines.push(truncateToWidth4("  " + theme.fg("dim", hint), width));
     lines.push("");
@@ -13375,7 +13377,7 @@ var FleetList = class {
     if (row.kind === "job") {
       const job = row.job;
       const colour = job.status === "failed" || job.status === "killed" ? "error" : job.status === "completed" ? "success" : "text";
-      const label = `${job.kind === "agent" ? "process" : job.kind === "monitor" ? "monitor" : "bash"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
+      const label = `${job.kind === "agent" ? "process" : job.kind === "monitor" ? "monitor" : job.shell ?? "shell"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
       const status = `${job.status}${job.exitCode !== void 0 ? ` exit=${job.exitCode}` : ""} \xB7 ${formatFleetElapsed((job.endTime ?? Date.now()) - job.startTime)}`;
       return rightAlign(`${"  ".repeat(row.depth + 1)}${this.bullet(index, sel, theme)} ${label}`, theme.fg(colour, status), width);
     }
