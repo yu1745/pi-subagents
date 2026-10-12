@@ -114,7 +114,6 @@ export interface ForegroundSlot {
 // --- Event types ---
 export const EVENT = {
     stall: "bg-stall",
-    semanticStall: "bg-semantic-stall",
     taskNotification: "task-notification",
     monitorEvent: "bg-monitor-event",
 } as const;

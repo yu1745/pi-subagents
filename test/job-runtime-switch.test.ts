@@ -9,7 +9,7 @@ beforeEach(() => {
   home = hermeticDir({ settings: { schedulingEnabled: false, workflowsEnabled: false } });
   vi.stubEnv("PI_SUBAGENTS_JOB_RUNTIME", undefined);
   // This is the top-level switch wiring; process cleanup is exercised by the
-  // real-runtime/SDK suites. No runtime hooks or watchdog resources here.
+  // real-runtime/SDK suites. No runtime hooks are installed here.
   vi.spyOn(JobRuntime.prototype, "installRoot").mockImplementation(() => {});
   boot = makePi();
   extension(boot.pi);

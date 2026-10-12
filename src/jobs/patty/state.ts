@@ -6,7 +6,6 @@
  */
 
 import type { ForegroundSlot, Job } from "./types.js";
-import type { JobWatchdog } from "./watchdog/index.js";
 
 export class BackgroundRegistry {
     jobs = new Map<string, Job>();
@@ -18,7 +17,6 @@ export class BackgroundRegistry {
     onChange: (() => void) | undefined;
     /** Presentation only; never routes tools or changes owner capabilities. */
     taskUI: { refresh(): void; open(): void } | undefined;
-    watchdog: JobWatchdog | undefined;
     foreground = new Map<string, ForegroundSlot>();
 
     /** Per-job AbortController — abort() cancels all monitors/pollers for that job. */
@@ -39,7 +37,6 @@ export class BackgroundRegistry {
         this.lifetime = parent.lifetime;
         this.jobAborts = parent.jobAborts;
         this.allJobs = parent.allJobs;
-        this.watchdog = parent.watchdog;
         this.retainResults = parent.retainResults;
         this.onChange = parent.onChange;
         this.taskUI = parent.taskUI;

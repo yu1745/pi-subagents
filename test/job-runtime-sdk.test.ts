@@ -38,8 +38,6 @@ describe("fused jobs through the real SDK runner/manager lifecycle", () => {
     vi.stubEnv("PI_CODING_AGENT_DIR", home);
     vi.stubEnv("HOME", home);
     vi.stubEnv("PI_SUBAGENTS_JOB_RUNTIME", "1");
-    vi.stubEnv("PI_PATTY_WATCHDOG_LOG", "0");
-    vi.stubEnv("PI_PATTY_WATCHDOG", "0");
     // Fixture-only git repository, never either plugin's working tree.
     await exec("git", ["init", "-q", cwd]);
     await exec("git", ["-C", cwd, "config", "user.name", "Test Fixture"]);

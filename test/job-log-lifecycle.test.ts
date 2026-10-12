@@ -14,7 +14,6 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 
 describe("live log viewing is not an attach consumer", () => {
   it("keeps child completion notices intact during viewing and protects captures against scoped cleanup", async () => {
-    vi.stubEnv("PI_PATTY_WATCHDOG", "0"); vi.stubEnv("PI_PATTY_WATCHDOG_LOG", "0");
     const cwd = mkdtempSync(join(tmpdir(), "log-lifecycle-"));
     const host = jobHost(cwd);
     const runtime = new JobRuntime(host.pi);

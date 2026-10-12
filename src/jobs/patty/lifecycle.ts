@@ -60,7 +60,6 @@ export function startBackgroundJob(args: {
     const generation = args.reg.generation;
     ensureCompletionPromise(args.job);
     const jobAc = createJobAbort(args.reg, args.job.id);
-    args.reg.watchdog?.track(args.job, args.ctx, jobAc.signal);
     const cancelStall = watchStalls({
         jobId: args.job.id,
         command: args.job.command,

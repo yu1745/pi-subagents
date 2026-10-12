@@ -34,7 +34,6 @@ describe("installed extension bundle", () => {
 
   it.each(["0", "1"])("preserves registrations with the owned-job runtime=%s", async runtime => {
     vi.stubEnv("PI_SUBAGENTS_JOB_RUNTIME", runtime);
-    vi.stubEnv("PI_PATTY_WATCHDOG_LOG", "0");
     const source = makePi();
     const bundled = makePi();
     boots.push(source, bundled);

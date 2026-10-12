@@ -6,7 +6,7 @@ https://github.com/yu1745/pi-patty-bg-tasks, revision
 The original copyright and license are preserved in [patty/LICENSE](patty/LICENSE).
 
 Copied infrastructure includes shell supervision and capture, job registry,
-notifications, monitor sources, watchdog, tool adapters, commands and UI helpers.
+notifications, monitor sources, tool adapters, commands and UI helpers.
 These are local source copies, not a runtime dependency on another installed
 extension. The upstream entry point is replaced by `runtime.ts`.
 

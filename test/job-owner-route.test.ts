@@ -6,21 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sendTaskNotification } from "../src/jobs/patty/notify.js";
 import { cleanupTerminal } from "../src/jobs/patty/registry.js";
 import { EVENT, type Job } from "../src/jobs/patty/types.js";
-import * as watchdog from "../src/jobs/patty/watchdog/index.js";
 import { JobRuntime } from "../src/jobs/runtime.js";
 import { jobChild, jobHost, until } from "./helpers/job-runtime.js";
-
-vi.mock("../src/jobs/patty/watchdog/index.js", async original => {
-  const actual = await original<typeof watchdog>();
-  return { ...actual, createJobWatchdog: vi.fn(actual.createJobWatchdog) };
-});
 
 describe("job notifications stay in the owning session", () => {
   let cwd: string;
   let runtime: JobRuntime;
   let main: ReturnType<typeof jobHost>;
   beforeEach(async () => {
-    vi.stubEnv("PI_PATTY_WATCHDOG", "0"); vi.stubEnv("PI_PATTY_WATCHDOG_LOG", "0");
     cwd = mkdtempSync(join(tmpdir(), "job-owner-route-"));
     main = jobHost(cwd); runtime = new JobRuntime(main.pi); runtime.installRoot();
     await main.emit("session_start");
@@ -47,22 +40,6 @@ describe("job notifications stay in the owning session", () => {
     await main.execute("jobs", { action: "output", jobId: job.id });
     await main.execute("jobs", { action: "list" });
     expect(child.notices).toHaveLength(1); expect(main.notices).toHaveLength(0);
-  });
-
-  it("shared watchdog notices also stay with the owner and never fall back to main after eviction", async () => {
-    const child = await jobChild(runtime, cwd, "watched");
-    await child.execute("bash", { command: "sleep 1", run_in_background: true });
-    const job = [...runtime.registry.jobs.values()][0];
-    const routed = vi.mocked(watchdog.createJobWatchdog).mock.calls.at(-1)![0];
-    const message = { customType: EVENT.semanticStall, content: "fixture", display: true, details: { jobId: job.id } };
-    routed.sendMessage(message, { triggerTurn: false });
-    expect(child.notices).toHaveLength(1); expect(main.notices).toHaveLength(0);
-    routed.sendMessage({ ...message, details: { jobId: "evicted-owner-job" } }, { triggerTurn: true });
-    expect(main.notices).toHaveLength(0);
-    await child.emit("session_shutdown");
-    routed.sendMessage(message, { triggerTurn: true });
-    expect(child.notices).toHaveLength(1); expect(main.notices).toHaveLength(0);
-    expect(runtime.registry.jobs.get(job.id)).toBe(job);
   });
 
   it("main's own jobs still notify main exactly once", async () => {

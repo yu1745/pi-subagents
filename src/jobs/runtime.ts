@@ -14,8 +14,6 @@ import { registerBashBgTool } from "./patty/tools/bash-bg.js";
 import { registerJobsTool } from "./patty/tools/jobs.js";
 import { registerMonitorTool } from "./patty/tools/monitor.js";
 import { EVENT, type Job } from "./patty/types.js";
-import { createJobWatchdog } from "./patty/watchdog/index.js";
-import { formatWatchdogTraceStats, readWatchdogTrace } from "./patty/watchdog/trace-report.js";
 
 /** Opt-in at next process startup only. Never changes installed packages/settings. */
 export function jobRuntimeEnabled(): boolean {
@@ -124,7 +122,6 @@ export class JobRuntime {
 
   installRoot(): void {
     this.registry.nonInteractive = detectNonInteractive(process.argv, !!process.stdin.isTTY);
-    this.registry.watchdog = this.createWatchdog();
     this.install(this.pi, this.root);
     registerCommands(this.pi, this.registry);
     registerShortcuts(this.pi, this.registry);
@@ -136,40 +133,11 @@ export class JobRuntime {
         return new Text(theme.fg(colour, `${owner}${details?.summary ?? String(message.content)}`), 0, 0);
       });
     }
-    this.pi.registerCommand("stuck-watchdog", {
-      description: "Inspect or toggle unified Jev-based semantic stall detection",
-      handler: async (args, ctx) => {
-        const [action = "status", id] = args.trim().split(/\s+/, 2);
-        const watchdog = this.registry.watchdog!;
-        if (action === "on" || action === "off") {
-          watchdog.setEnabled(action === "on");
-          ctx.ui.notify(`Semantic stuck watchdog ${action === "on" ? "enabled" : "disabled; no jobs were changed"}.`, "info");
-          return;
-        }
-        if (action === "check") {
-          if (!id) { ctx.ui.notify("Usage: /stuck-watchdog check <job-id>", "warning"); return; }
-          await watchdog.inspectNow(id, ctx);
-          return;
-        }
-        if (action === "log" || action === "stats") {
-          const path = watchdog.trace?.path;
-          if (!path) { ctx.ui.notify("Watchdog tracing is disabled (PI_PATTY_WATCHDOG_LOG=0).", "warning"); return; }
-          const report = await readWatchdogTrace(path);
-          ctx.ui.notify(report ? formatWatchdogTraceStats(report.stats) : `No watchdog trace yet at ${path}.`, "info");
-          return;
-        }
-        const items = watchdog.status();
-        const lines = items.map(item => `${item.jobId} age=${item.ageSeconds}s${item.verdict ? ` stuck=${item.verdict.stuck.toFixed(2)} cause=${item.verdict.likelyCause}` : " unchecked"}`);
-        ctx.ui.notify(`Semantic stuck watchdog is ${watchdog.isEnabled() ? "on" : "off"}. Tracking ${items.length} job(s).${lines.length ? `\n${lines.join("\n")}` : ""}\nTrace: ${watchdog.trace?.path ?? "disabled"} (use /stuck-watchdog stats)`, "info");
-      },
-    });
     this.pi.on("session_start", async (_event, ctx) => {
       if (this.registry.disposed) {
         if ([...this.storage.values()].some(job => job.status === "running")) throw new Error("Cannot restart job runtime while old jobs remain unconfirmed");
         this.registry.generation++;
         this.registry.disposed = false;
-        this.registry.watchdog = this.createWatchdog();
-        for (const owner of this.owners.values()) owner.registry.watchdog = this.registry.watchdog;
       }
       this.ctx = ctx;
       this.root.sessionId = ctx.sessionManager.getSessionId();
@@ -183,19 +151,6 @@ export class JobRuntime {
    * no second manager, and no global lookup that can bind to the wrong parent. */
   childExtension(agentId: string): InlineExtension {
     return { name: JOB_RUNTIME_EXTENSION, factory: pi => this.install(pi, this.owner(agentId)) };
-  }
-
-  private createWatchdog() {
-    // The shared sampler must not become a second parent-forwarding route.
-    const sendMessage: ExtensionAPI["sendMessage"] = (message, options) => {
-      const details = message.details as { jobId?: string } | undefined;
-      const job = details?.jobId ? this.storage.get(details.jobId) : undefined;
-      if (details?.jobId && !job) return;
-      const agentId = job?.ownerAgentId;
-      if (agentId) this.owners.get(agentId)?.deliverNotice?.(message, options);
-      else this.pi.sendMessage(message, options);
-    };
-    return createJobWatchdog(new Proxy(this.pi, { get: (target, key) => key === "sendMessage" ? sendMessage : Reflect.get(target, key) }), this.registry);
   }
 
   private install(pi: ExtensionAPI, owner: Owner): void {
@@ -233,7 +188,6 @@ export class JobRuntime {
       return Reflect.get(target, key);
     } });
     const reg = owner.registry;
-    reg.watchdog = this.registry.watchdog;
     registerBashTool(scopedPi, reg, createBashToolDefinition(process.cwd()));
     if (process.platform === "win32") registerBashTool(scopedPi, reg, createPowerShellToolDefinition(process.cwd()), "powershell");
     registerBashBgTool(scopedPi, reg);
@@ -354,7 +308,6 @@ export class JobRuntime {
     const stopped = await this.stopAll();
     this.registry.disposed = true;
     this.registry.generation++;
-    this.registry.watchdog?.dispose();
     this.registry.onChange?.();
     this.ctx = undefined;
     if (!stopped) throw new Error("Job termination unconfirmed at shutdown; captures retained and live worktrees must not be removed");

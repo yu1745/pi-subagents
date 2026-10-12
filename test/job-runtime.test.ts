@@ -17,8 +17,6 @@ describe("parent-owned Patty job runtime", () => {
   let runtime: JobRuntime;
   let main: ReturnType<typeof jobHost>;
   beforeEach(async () => {
-    vi.stubEnv("PI_PATTY_WATCHDOG_LOG", "0");
-    vi.stubEnv("PI_PATTY_WATCHDOG", "0");
     cwd = mkdtempSync(join(tmpdir(), "subagents-job-test-"));
     main = jobHost(cwd);
     runtime = new JobRuntime(main.pi);

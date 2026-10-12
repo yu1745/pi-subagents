@@ -6397,8 +6397,8 @@ var init_conversation_viewer = __esm({
 
 // src/index.ts
 init_agent_color();
-import { existsSync as existsSync12, mkdirSync as mkdirSync9, readFileSync as readFileSync11, unlinkSync as unlinkSync7, writeFileSync as writeFileSync6 } from "node:fs";
-import { isAbsolute as isAbsolute6, join as join16 } from "node:path";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync11, unlinkSync as unlinkSync7, writeFileSync as writeFileSync6 } from "node:fs";
+import { isAbsolute as isAbsolute6, join as join15 } from "node:path";
 import { StringEnum as StringEnum2 } from "@earendil-works/pi-ai";
 import { defineTool as defineTool3, getAgentDir as getAgentDir10, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container as Container3, Key as Key2, matchesKey as matchesKey9, SettingsList, Spacer, Text as Text6 } from "@earendil-works/pi-tui";
@@ -6784,7 +6784,6 @@ var JOB_ID_PREFIX = {
 };
 var EVENT = {
   stall: "bg-stall",
-  semanticStall: "bg-semantic-stall",
   taskNotification: "task-notification",
   monitorEvent: "bg-monitor-event"
 };
@@ -7617,17 +7616,17 @@ __name(spawnWithFileOutput, "spawnWithFileOutput");
 function ensureLogDir(logPath) {
   const dir = dirname3(logPath);
   mkdirSync4(dir, { recursive: true, mode: 448 });
-  const stat2 = lstatSync2(dir);
-  if (!isSafeLogDirectory(stat2)) {
+  const stat = lstatSync2(dir);
+  if (!isSafeLogDirectory(stat)) {
     throw new Error(`Unsafe log directory: ${dir}`);
   }
 }
 __name(ensureLogDir, "ensureLogDir");
-function isSafeLogDirectory(stat2, platform = process.platform, uid) {
-  if (!stat2.isDirectory() || stat2.isSymbolicLink()) return false;
+function isSafeLogDirectory(stat, platform = process.platform, uid) {
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
   if (platform === "win32") return true;
   const owner = uid ?? process.getuid?.();
-  return (owner === void 0 || stat2.uid === owner) && !(stat2.mode & 18);
+  return (owner === void 0 || stat.uid === owner) && !(stat.mode & 18);
 }
 __name(isSafeLogDirectory, "isSafeLogDirectory");
 var ownedProcesses = /* @__PURE__ */ new WeakMap();
@@ -7705,7 +7704,6 @@ function startBackgroundJob(args) {
   const generation = args.reg.generation;
   ensureCompletionPromise(args.job);
   const jobAc = createJobAbort(args.reg, args.job.id);
-  args.reg.watchdog?.track(args.job, args.ctx, jobAc.signal);
   const cancelStall = watchStalls({
     jobId: args.job.id,
     command: args.job.command,
@@ -8027,7 +8025,6 @@ var BackgroundRegistry = class {
   onChange;
   /** Presentation only; never routes tools or changes owner capabilities. */
   taskUI;
-  watchdog;
   foreground = /* @__PURE__ */ new Map();
   /** Per-job AbortController — abort() cancels all monitors/pollers for that job. */
   jobAborts = /* @__PURE__ */ new Map();
@@ -8053,7 +8050,6 @@ var BackgroundRegistry = class {
     this.lifetime = parent.lifetime;
     this.jobAborts = parent.jobAborts;
     this.allJobs = parent.allJobs;
-    this.watchdog = parent.watchdog;
     this.retainResults = parent.retainResults;
     this.onChange = parent.onChange;
     this.taskUI = parent.taskUI;
@@ -9542,945 +9538,6 @@ function registerMonitorTool(pi, reg) {
 }
 __name(registerMonitorTool, "registerMonitorTool");
 
-// src/jobs/patty/watchdog/index.ts
-import { open, stat } from "node:fs/promises";
-
-// src/jobs/patty/watchdog/jev-service.ts
-var JEV_SERVICE_REQUEST_EVENT = "typesafe-jev:get-service:v1";
-function discoverJevService(pi) {
-  let service;
-  pi.events.emit(JEV_SERVICE_REQUEST_EVENT, {
-    accept(candidate) {
-      if (!service && candidate?.version === 1) service = candidate;
-    }
-  });
-  return service;
-}
-__name(discoverJevService, "discoverJevService");
-
-// src/jobs/patty/watchdog/proc-sampler.ts
-import { execFileSync } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
-function parseProcStat(text) {
-  const open3 = text.indexOf("(");
-  const close = text.lastIndexOf(")");
-  if (open3 <= 0 || close <= open3) return void 0;
-  const pid = Number(text.slice(0, open3).trim());
-  const fields = text.slice(close + 1).trim().split(/\s+/);
-  if (!Number.isInteger(pid) || fields.length < 22) return void 0;
-  const state = fields[0] ?? "?";
-  const ppid = Number(fields[1]);
-  const pgrp = Number(fields[2]);
-  const utime = Number(fields[11]);
-  const stime = Number(fields[12]);
-  const rssPages = Number(fields[21]);
-  if (![ppid, pgrp, utime, stime, rssPages].every(Number.isFinite)) return void 0;
-  return {
-    pid,
-    comm: text.slice(open3 + 1, close),
-    state,
-    ppid,
-    pgrp,
-    cpuTicks: utime + stime,
-    rssPages
-  };
-}
-__name(parseProcStat, "parseProcStat");
-function getconf(name) {
-  try {
-    const value = Number(execFileSync("getconf", [name], { encoding: "utf8", timeout: 1e3 }).trim());
-    return Number.isFinite(value) && value > 0 ? value : void 0;
-  } catch {
-    return void 0;
-  }
-}
-__name(getconf, "getconf");
-var cachedClockTicks;
-var cachedPageKb;
-function clockTicks() {
-  cachedClockTicks ??= getconf("CLK_TCK");
-  return cachedClockTicks;
-}
-__name(clockTicks, "clockTicks");
-function pageKb() {
-  cachedPageKb ??= (getconf("PAGESIZE") ?? 4096) / 1024;
-  return cachedPageKb;
-}
-__name(pageKb, "pageKb");
-async function optionalText(path) {
-  try {
-    return await readFile(path, "utf8");
-  } catch {
-    return void 0;
-  }
-}
-__name(optionalText, "optionalText");
-function statusRssKb(text, fallbackPages) {
-  const match = text?.match(/^VmRSS:\s+(\d+)\s+kB$/m);
-  return match ? Number(match[1]) : Math.max(0, fallbackPages * pageKb());
-}
-__name(statusRssKb, "statusRssKb");
-function descendantsOf(rootPid, all) {
-  const selected = /* @__PURE__ */ new Set([rootPid]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const process2 of all.values()) {
-      if (!selected.has(process2.pid) && selected.has(process2.ppid)) {
-        selected.add(process2.pid);
-        changed = true;
-      }
-    }
-  }
-  return selected;
-}
-__name(descendantsOf, "descendantsOf");
-async function sampleProcessGroup(rootPid, procRoot = "/proc") {
-  const sampledAt = Date.now();
-  if (process.platform !== "linux" || rootPid <= 0) {
-    return {
-      supported: false,
-      sampledAt,
-      rootPid,
-      leaderAlive: false,
-      processCount: 0,
-      pids: [],
-      totalCpuTicks: 0,
-      totalRssKb: 0,
-      states: {},
-      waitChannels: {},
-      processes: []
-    };
-  }
-  let names;
-  try {
-    names = await readdir(procRoot);
-  } catch {
-    return {
-      supported: false,
-      sampledAt,
-      rootPid,
-      leaderAlive: false,
-      processCount: 0,
-      pids: [],
-      totalCpuTicks: 0,
-      totalRssKb: 0,
-      states: {},
-      waitChannels: {},
-      processes: []
-    };
-  }
-  const stats2 = await Promise.all(names.filter((name) => /^\d+$/.test(name)).map(async (name) => {
-    const text = await optionalText(`${procRoot}/${name}/stat`);
-    return text ? parseProcStat(text) : void 0;
-  }));
-  const all = new Map(stats2.filter((entry) => entry !== void 0).map((entry) => [entry.pid, entry]));
-  const selected = descendantsOf(rootPid, all);
-  for (const process2 of all.values()) {
-    if (process2.pgrp === rootPid) selected.add(process2.pid);
-  }
-  const processes = (await Promise.all([...selected].map(async (pid) => {
-    const current = all.get(pid);
-    if (!current) return void 0;
-    const [status, rawWchan] = await Promise.all([
-      optionalText(`${procRoot}/${pid}/status`),
-      optionalText(`${procRoot}/${pid}/wchan`)
-    ]);
-    const wchan = rawWchan?.trim();
-    return {
-      ...current,
-      rssKb: statusRssKb(status, current.rssPages),
-      ...wchan && wchan !== "0" ? { wchan } : {}
-    };
-  }))).filter((entry) => entry !== void 0).sort((a, b) => a.pid - b.pid);
-  const states = {};
-  const waitChannels = {};
-  for (const process2 of processes) {
-    states[process2.state] = (states[process2.state] ?? 0) + 1;
-    if (process2.wchan) waitChannels[process2.wchan] = (waitChannels[process2.wchan] ?? 0) + 1;
-  }
-  return {
-    supported: true,
-    sampledAt,
-    rootPid,
-    leaderAlive: all.has(rootPid),
-    processCount: processes.length,
-    pids: processes.map((process2) => process2.pid),
-    totalCpuTicks: processes.reduce((sum, process2) => sum + process2.cpuTicks, 0),
-    totalRssKb: processes.reduce((sum, process2) => sum + process2.rssKb, 0),
-    states,
-    waitChannels,
-    ...clockTicks() ? { clockTicksPerSecond: clockTicks() } : {},
-    processes
-  };
-}
-__name(sampleProcessGroup, "sampleProcessGroup");
-
-// src/jobs/patty/watchdog/trace.ts
-import { appendFileSync as appendFileSync3, mkdirSync as mkdirSync6, renameSync as renameSync2, statSync as statSync7 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join12, parse } from "node:path";
-var WATCHDOG_TRACE_MAX_BYTES = 8 * 1024 * 1024;
-var DISABLED_VALUES = /* @__PURE__ */ new Set(["", "0", "off", "false", "no", "none"]);
-function dirnameOf(path) {
-  const index = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return index > 0 ? path.slice(0, index) : path;
-}
-__name(dirnameOf, "dirnameOf");
-function defaultTracePath(env) {
-  const configDir = env.PI_CODING_AGENT_DIR?.trim() || join12(homedir4(), ".pi", "agent");
-  return join12(configDir, "watchdog", "events.jsonl");
-}
-__name(defaultTracePath, "defaultTracePath");
-function resolveWatchdogTracePath(env = process.env) {
-  const configured = env.PI_PATTY_WATCHDOG_LOG?.trim();
-  if (configured) return DISABLED_VALUES.has(configured.toLowerCase()) ? void 0 : configured;
-  if (configured === "" || env.NODE_TEST_CONTEXT) return void 0;
-  return defaultTracePath(env);
-}
-__name(resolveWatchdogTracePath, "resolveWatchdogTracePath");
-function ensureDirSync(dir) {
-  const { root } = parse(dir);
-  let current = root;
-  for (const part of dir.slice(root.length).split(/[/\\]/).filter(Boolean)) {
-    current = current ? join12(current, part) : part;
-    try {
-      mkdirSync6(current);
-    } catch (error) {
-      if (error.code === "EEXIST") continue;
-      throw error;
-    }
-  }
-}
-__name(ensureDirSync, "ensureDirSync");
-function rotateIfOversized(path) {
-  try {
-    if (statSync7(path).size < WATCHDOG_TRACE_MAX_BYTES) return;
-    renameSync2(path, `${path}.1`);
-  } catch {
-  }
-}
-__name(rotateIfOversized, "rotateIfOversized");
-function createWatchdogTrace(path = resolveWatchdogTracePath()) {
-  if (!path) return { path: void 0, record() {
-  } };
-  let active2 = true;
-  try {
-    ensureDirSync(dirnameOf(path));
-    rotateIfOversized(path);
-  } catch {
-    active2 = false;
-  }
-  return {
-    path: active2 ? path : void 0,
-    record(event, data = {}) {
-      if (!active2) return;
-      const line = JSON.stringify({
-        ts: (/* @__PURE__ */ new Date()).toISOString(),
-        event,
-        extensionPid: process.pid,
-        sessionId: process.env.PI_SESSION_ID ?? null,
-        ...data
-      });
-      try {
-        appendFileSync3(path, `${line}
-`);
-      } catch {
-        active2 = false;
-      }
-    }
-  };
-}
-__name(createWatchdogTrace, "createWatchdogTrace");
-function summarizeTail(tail, maxChars = 400) {
-  const text = tail.replace(/\s+$/u, "");
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\u2026[truncated]`;
-}
-__name(summarizeTail, "summarizeTail");
-function boundJson(value, maxStringChars = 4e3, depth = 8) {
-  if (value === void 0) return void 0;
-  if (typeof value === "string") {
-    return value.length <= maxStringChars ? value : `${value.slice(0, maxStringChars)}\u2026[truncated]`;
-  }
-  if (typeof value !== "object" || value === null) return value;
-  if (depth <= 0) return "[depth-limit]";
-  if (Array.isArray(value)) return value.slice(0, 64).map((item) => boundJson(item, maxStringChars, depth - 1));
-  const out = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (item === void 0) continue;
-    out[key] = boundJson(item, maxStringChars, depth - 1);
-  }
-  return out;
-}
-__name(boundJson, "boundJson");
-
-// src/jobs/patty/watchdog/index.ts
-var WATCHDOG_POLL_MS = 15e3;
-var WATCHDOG_MIN_AGE_MS = 3e4;
-var WATCHDOG_QUIET_MS = 3e4;
-var WATCHDOG_REPEAT_MS = 6e4;
-var WATCHDOG_RECHECK_MS = 3e4;
-var WATCHDOG_ALERT_COOLDOWN_MS = 15 * 6e4;
-var WATCHDOG_MAX_LOG_BYTES = 8e3;
-var WATCHDOG_MAX_REFERENCED_FILES = 3;
-var WATCHDOG_MAX_REFERENCED_FILE_BYTES = 4e3;
-var WATCHDOG_BLOCK_THRESHOLD = 0.7;
-var WATCHDOG_DIRECT_BLOCK_THRESHOLD = 0.85;
-var WATCHDOG_SUPPRESSION_THRESHOLD = 0.5;
-var WATCHDOG_REQUIRED_CONSECUTIVE = 2;
-var WATCHDOG_JEV_TIMEOUT_MS = 1e4;
-async function readLogTail2(path, maxBytes = WATCHDOG_MAX_LOG_BYTES) {
-  const info = await stat(path);
-  const length = Math.min(info.size, maxBytes);
-  if (length <= 0) return { size: info.size, tail: "" };
-  const handle = await open(path, "r");
-  try {
-    const buffer = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buffer, 0, length, Math.max(0, info.size - length));
-    return { size: info.size, tail: buffer.toString("utf8", 0, bytesRead) };
-  } finally {
-    await handle.close();
-  }
-}
-__name(readLogTail2, "readLogTail");
-function referencedLogPaths(command) {
-  const paths = [];
-  const seen = /* @__PURE__ */ new Set();
-  const pattern = /(?<![.\w])\/(?:[^\s'"`;|&()<>])+\.(?:log|out|txt)\b/giu;
-  for (const match of command.matchAll(pattern)) {
-    const path = match[0];
-    if (!seen.has(path)) {
-      seen.add(path);
-      paths.push(path);
-    }
-    if (paths.length >= WATCHDOG_MAX_REFERENCED_FILES) break;
-  }
-  return paths;
-}
-__name(referencedLogPaths, "referencedLogPaths");
-async function readReferencedLogs(command, ownLogPath) {
-  const observations = await Promise.all(referencedLogPaths(command).filter((path) => path !== ownLogPath).map(async (path) => {
-    try {
-      const value = await readLogTail2(path, WATCHDOG_MAX_REFERENCED_FILE_BYTES);
-      return { path, ...value };
-    } catch {
-      return void 0;
-    }
-  }));
-  return observations.filter((value) => value !== void 0);
-}
-__name(readReferencedLogs, "readReferencedLogs");
-function normalizedLines(text) {
-  return text.split(/\r?\n/).slice(-30).map((line) => line.replace(/\b\d{4}-\d{2}-\d{2}T[^\s]+/g, "<timestamp>").replace(/\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/g, "<time>").replace(/\b\d+\b/g, "<n>").trim()).filter(Boolean);
-}
-__name(normalizedLines, "normalizedLines");
-function outputFingerprint(text) {
-  const lines = normalizedLines(text);
-  return {
-    fingerprint: lines.join("\n"),
-    repetitive: lines.length >= 6 && new Set(lines).size <= Math.max(2, Math.floor(lines.length / 5))
-  };
-}
-__name(outputFingerprint, "outputFingerprint");
-function probability(answer, name) {
-  if (typeof answer?.noul !== "number" || answer.noul < 0 || answer.noul > 1) {
-    throw new Error(`Jev returned invalid ${name} probability`);
-  }
-  return answer.noul;
-}
-__name(probability, "probability");
-function processObservation(previous, current) {
-  const elapsedSeconds = previous ? Math.max(1e-3, (current.sampledAt - previous.sampledAt) / 1e3) : 0;
-  const cpuTicksDelta = previous ? Math.max(0, current.totalCpuTicks - previous.totalCpuTicks) : 0;
-  const ticksPerSecond = current.clockTicksPerSecond;
-  const cpuCoreUtilization = ticksPerSecond && elapsedSeconds > 0 ? cpuTicksDelta / ticksPerSecond / elapsedSeconds : void 0;
-  return {
-    supported: current.supported,
-    root_pid: current.rootPid,
-    leader_alive: current.leaderAlive,
-    process_count: current.processCount,
-    process_set_changed: previous ? previous.pids.join(",") !== current.pids.join(",") : null,
-    states: current.states,
-    wait_channels: current.waitChannels,
-    total_rss_kb: current.totalRssKb,
-    cumulative_cpu_ticks: current.totalCpuTicks,
-    sample_interval_seconds: elapsedSeconds,
-    cpu_ticks_delta: cpuTicksDelta,
-    ...cpuCoreUtilization === void 0 ? {} : { cpu_core_utilization: Number(cpuCoreUtilization.toFixed(4)) },
-    processes: current.processes.slice(0, 24).map((process2) => ({
-      pid: process2.pid,
-      ppid: process2.ppid,
-      pgrp: process2.pgrp,
-      command: process2.comm,
-      state: process2.state,
-      cpu_ticks: process2.cpuTicks,
-      rss_kb: process2.rssKb,
-      ...process2.wchan ? { wait_channel: process2.wchan } : {}
-    }))
-  };
-}
-__name(processObservation, "processObservation");
-async function askJev(service, tracked, log, process2, referencedFiles, now, trace) {
-  const job = tracked.job;
-  const state = {
-    task: {
-      id: job.id,
-      kind: job.kind ?? "shell",
-      name: job.name ?? null,
-      command: job.command,
-      elapsed_seconds: Math.round((now - job.startTime) / 1e3),
-      intentionally_persistent: job.persistent === true
-    },
-    log_observation: {
-      total_bytes: log.size,
-      quiet_seconds: Math.round((now - tracked.lastLogGrowthAt) / 1e3),
-      repetitive_seconds: tracked.repeatSince ? Math.round((now - tracked.repeatSince) / 1e3) : 0,
-      recent_tail: log.tail || "(no output)"
-    },
-    process_observation: processObservation(tracked.previousProcess, process2),
-    referenced_file_observations: referencedFiles.map((file) => ({
-      path: file.path,
-      total_bytes: file.size,
-      size_delta_since_last_sample: file.sizeDelta,
-      quiet_seconds: file.quietSeconds,
-      recent_tail: file.tail || "(empty)"
-    })),
-    decision_policy: {
-      action: "Advisory inspection only; never terminate or mutate a job automatically.",
-      risk_bias: "Avoid false alerts caused only by duration, quiet output, low CPU, or an ordinary bounded wait."
-    }
-  };
-  const noul = /* @__PURE__ */ __name((question, yes, no) => ({
-    type: "noul",
-    instructions: {
-      question,
-      rule: "Use only the supplied task, log, referenced-file, and process observations. Uncertainty means false."
-    },
-    criteria: { true: { what: yes }, false: { what: no } }
-  }), "noul");
-  const questions = {
-    missed_terminal_state: noul(
-      "Does `log_observation.recent_tail` or `referenced_file_observations` already show a terminal success or failure state that the polling predicate in `task.command` fails to recognize?",
-      "Output explicitly reports termination, failure, crash, exit, or success while the command is still waiting for a different marker.",
-      "No terminal state is visible, or the command's predicate recognizes it."
-    ),
-    unavailable_interactive_input: noul(
-      "Is `task` waiting for interactive input that cannot be supplied to this detached background process?",
-      "Output requests input and process telemetry supports a stdin/read wait with no interactive channel.",
-      "No input is requested, or an input channel is available."
-    ),
-    dead_required_dependency: noul(
-      "Does the evidence show that a producer, child, service, file, socket, or upstream dependency required by `task.command` has terminated or become unreachable?",
-      "A required dependency is explicitly reported failed, exited, or unreachable while the task continues waiting for it.",
-      "The dependency is alive or available, or its failure is not established."
-    ),
-    mistaken_nonproductive_scope: noul(
-      "Is `task.command` an unbounded or grossly over-broad filesystem traversal for its stated target, with prolonged telemetry showing no useful result?",
-      "A root- or home-wide search is clearly disproportionate to locating the named target and has spent several minutes traversing without output.",
-      "The scope is bounded or reasonable, useful matches are appearing, or a scope error is not established."
-    ),
-    repeating_nonprogress: noul(
-      "Does `log_observation` show the same failed state repeating long enough that `task` is not approaching completion?",
-      "Repeated normalized output reports the same state for at least two minutes with no changed process or result.",
-      "Output changes, repetition represents progress, or no sustained repetition is shown."
-    ),
-    credible_useful_progress: noul(
-      "Is `task` credibly progressing toward a useful terminating result without operator intervention?",
-      "Recent log growth, meaningful CPU work, process evolution, transfer progress, or a bounded still-valid wait supports useful completion.",
-      "Evidence specifically supports a broken completion path, rather than mere silence or low CPU."
-    ),
-    expected_indefinite_service: noul(
-      "Is `task` intentionally designed to stay alive indefinitely as a server, watcher, event monitor, or log follower?",
-      "The declared command is a long-lived service or monitor whose continued running is success.",
-      "The command is expected to terminate with a result; a finite sleep or bounded poll is not an indefinite service."
-    ),
-    valid_finite_wait: noul(
-      "Is `task` in an explicitly bounded finite wait whose deadline or attempt limit has not elapsed?",
-      "The command states a finite sleep, deadline, or retry count and is still within it, with no contradictory terminal evidence.",
-      "The wait is unbounded, expired, or contradicted by terminal or dependency-failure evidence."
-    ),
-    likely_cause: {
-      type: "choice",
-      instructions: {
-        question: "Which explanation best matches `task`, `log_observation`, `referenced_file_observations`, and `process_observation`?",
-        rule: "Choose insufficient_evidence unless one explanation has direct evidence."
-      },
-      criteria: {
-        legitimate_progress: "Useful work is credibly progressing.",
-        intentional_persistent_task: "A server, watcher, or monitor is correctly remaining alive.",
-        finite_requested_wait: "A bounded wait is still valid.",
-        insufficient_evidence: "No specific block or healthy path is established.",
-        stdin_or_interactive_wait: "Unavailable interactive input is required.",
-        missed_terminal_state: "Output already reports a terminal state omitted from the wait predicate.",
-        mistaken_scope: "A grossly over-broad traversal is operationally non-useful.",
-        dead_dependency: "A required producer or dependency is explicitly gone.",
-        buffering_or_pipeline_stall: "Buffering or an unclosed stream prevents completion.",
-        repeating_nonprogress_loop: "The same state repeats without progress.",
-        process_deadlock: "Wait states support a deadlock or circular wait."
-      }
-    }
-  };
-  trace.record("jev_request", {
-    jobId: job.id,
-    questionNames: Object.keys(questions),
-    state: boundJson(state)
-  });
-  const response = await service.evaluate({ state, questions }, { timeoutMs: WATCHDOG_JEV_TIMEOUT_MS });
-  const evidence = {
-    missedTerminalState: probability(response.answers.missed_terminal_state, "missed_terminal_state"),
-    unavailableInteractiveInput: probability(response.answers.unavailable_interactive_input, "unavailable_interactive_input"),
-    deadRequiredDependency: probability(response.answers.dead_required_dependency, "dead_required_dependency"),
-    mistakenNonproductiveScope: probability(response.answers.mistaken_nonproductive_scope, "mistaken_nonproductive_scope"),
-    repeatingNonprogress: probability(response.answers.repeating_nonprogress, "repeating_nonprogress")
-  };
-  const stuck = Math.max(...Object.values(evidence));
-  return {
-    stuck,
-    shouldAlert: stuck,
-    credibleProgress: probability(response.answers.credible_useful_progress, "credible_useful_progress"),
-    intentionallyPersistent: probability(response.answers.expected_indefinite_service, "expected_indefinite_service"),
-    validFiniteWait: probability(response.answers.valid_finite_wait, "valid_finite_wait"),
-    evidence,
-    likelyCause: response.answers.likely_cause?.choice ?? "insufficient_evidence",
-    model: response.model
-  };
-}
-__name(askJev, "askJev");
-function isHigh(verdict) {
-  return verdict.stuck >= WATCHDOG_BLOCK_THRESHOLD && verdict.credibleProgress <= WATCHDOG_SUPPRESSION_THRESHOLD && verdict.intentionallyPersistent <= WATCHDOG_SUPPRESSION_THRESHOLD && verdict.validFiniteWait <= WATCHDOG_SUPPRESSION_THRESHOLD;
-}
-__name(isHigh, "isHigh");
-function isDirectHigh(verdict) {
-  const directEvidence = Math.max(
-    verdict.evidence.missedTerminalState,
-    verdict.evidence.unavailableInteractiveInput,
-    verdict.evidence.deadRequiredDependency
-  );
-  return isHigh(verdict) && directEvidence >= WATCHDOG_DIRECT_BLOCK_THRESHOLD;
-}
-__name(isDirectHigh, "isDirectHigh");
-function verdictTraceFields(verdict) {
-  return {
-    stuck: Number(verdict.stuck.toFixed(3)),
-    credibleProgress: Number(verdict.credibleProgress.toFixed(3)),
-    intentionallyPersistent: Number(verdict.intentionallyPersistent.toFixed(3)),
-    validFiniteWait: Number(verdict.validFiniteWait.toFixed(3)),
-    likelyCause: verdict.likelyCause,
-    model: verdict.model,
-    evidence: Object.fromEntries(
-      Object.entries(verdict.evidence).map(([key, value]) => [key, Number(value.toFixed(3))])
-    )
-  };
-}
-__name(verdictTraceFields, "verdictTraceFields");
-function createJobWatchdog(pi, reg) {
-  const tracked = /* @__PURE__ */ new Map();
-  const trace = createWatchdogTrace();
-  let enabled = true;
-  let disposed = false;
-  let missingServiceNotified = false;
-  if (trace.path) trace.record("watchdog_start", { tracePath: trace.path, enabled });
-  const schedule = /* @__PURE__ */ __name((entry) => {
-    if (entry.cancelled || disposed || !enabled) return;
-    if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => {
-      entry.timer = void 0;
-      void inspect(entry, false);
-    }, WATCHDOG_POLL_MS);
-    entry.timer.unref();
-  }, "schedule");
-  const alert = /* @__PURE__ */ __name((entry, verdict, tail) => {
-    const job = entry.job;
-    const summary = `Background job "${describeJob(job.name, job.command)}" may be semantically blocked (${verdict.likelyCause})`;
-    const evidence = tail.trim().split(/\r?\n/).slice(-5).join("\n").slice(0, 1500) || "(no recent output)";
-    const content = [
-      `\u26A0\uFE0F ${summary}`,
-      `task=${job.id} pid=${job.pid} block=${verdict.stuck.toFixed(2)} progress=${verdict.credibleProgress.toFixed(2)} persistent=${verdict.intentionallyPersistent.toFixed(2)} finite-wait=${verdict.validFiniteWait.toFixed(2)} model=${verdict.model}`,
-      `Recent output:
-${evidence}`,
-      "Advisory only: inspect the command, process tree, and waiting assumption. Do not terminate it solely because of this notice."
-    ].join("\n");
-    entry.ctx.ui.notify(summary, "warning");
-    trace.record("alert", {
-      jobId: job.id,
-      pid: job.pid,
-      command: job.command,
-      logPath: job.logPath,
-      summary,
-      ...verdictTraceFields(verdict),
-      evidenceTail: summarizeTail(evidence, 800)
-    });
-    pi.sendMessage({
-      customType: EVENT.semanticStall,
-      content,
-      display: true,
-      details: {
-        jobId: job.id,
-        pid: job.pid,
-        logPath: job.logPath,
-        command: job.command,
-        verdict,
-        summary
-      }
-    }, DELIVER_STEER);
-  }, "alert");
-  const inspect = /* @__PURE__ */ __name(async (entry, force) => {
-    if (entry.cancelled || disposed || !enabled && !force || entry.checking || entry.job.status !== "running" || reg.jobs.get(entry.job.id) !== entry.job) return;
-    if (entry.timer) {
-      clearTimeout(entry.timer);
-      entry.timer = void 0;
-    }
-    entry.checking = true;
-    try {
-      const now = Date.now();
-      const [log, process2, referencedFiles] = await Promise.all([
-        readLogTail2(entry.job.logPath),
-        sampleProcessGroup(entry.job.pid),
-        readReferencedLogs(entry.job.command, entry.job.logPath)
-      ]);
-      if (log.size !== entry.lastLogSize) {
-        const output = outputFingerprint(log.tail);
-        if (output.repetitive && output.fingerprint === entry.lastFingerprint) entry.repeatSince ??= now;
-        else entry.repeatSince = void 0;
-        entry.lastFingerprint = output.fingerprint;
-        entry.lastLogSize = log.size;
-        entry.lastLogGrowthAt = now;
-      }
-      const referencedObservations = referencedFiles.map((file) => {
-        const previousSize = entry.referencedFileSizes.get(file.path);
-        if (previousSize === void 0 || previousSize !== file.size) {
-          entry.referencedFileGrowthAt.set(file.path, now);
-        }
-        entry.referencedFileSizes.set(file.path, file.size);
-        const growthAt = entry.referencedFileGrowthAt.get(file.path) ?? now;
-        return {
-          ...file,
-          sizeDelta: previousSize === void 0 ? null : file.size - previousSize,
-          quietSeconds: Math.round((now - growthAt) / 1e3)
-        };
-      });
-      const oldEnough = now - entry.job.startTime >= WATCHDOG_MIN_AGE_MS;
-      const quiet = now - entry.lastLogGrowthAt >= WATCHDOG_QUIET_MS;
-      const repeating = entry.repeatSince !== void 0 && now - entry.repeatSince >= WATCHDOG_REPEAT_MS;
-      const due = entry.lastCheckedAt === void 0 || now - entry.lastCheckedAt >= WATCHDOG_RECHECK_MS;
-      entry.previousProcess ??= process2;
-      const skipReason = !force ? entry.job.persistent === true ? "persistent_job" : !oldEnough ? "job_too_young" : !quiet && !repeating ? "log_still_growing" : !due ? "recheck_interval" : void 0 : void 0;
-      trace.record("poll", {
-        jobId: entry.job.id,
-        pid: entry.job.pid,
-        force,
-        ageSeconds: Math.round((now - entry.job.startTime) / 1e3),
-        logBytes: log.size,
-        logQuietSeconds: Math.round((now - entry.lastLogGrowthAt) / 1e3),
-        repetitiveSeconds: entry.repeatSince ? Math.round((now - entry.repeatSince) / 1e3) : 0,
-        process: {
-          supported: process2.supported,
-          leaderAlive: process2.leaderAlive,
-          processCount: process2.processCount,
-          states: process2.states,
-          waitChannels: process2.waitChannels,
-          totalRssKb: process2.totalRssKb
-        },
-        gate: skipReason ?? "passed",
-        tail: summarizeTail(log.tail)
-      });
-      if (skipReason) return;
-      const service = discoverJevService(pi);
-      if (!service) {
-        trace.record("no_service", { jobId: entry.job.id, notified: !missingServiceNotified });
-        if (!missingServiceNotified) {
-          missingServiceNotified = true;
-          entry.ctx.ui.notify("Semantic watchdog is waiting for TypeSafe Jev. Install/enable pi-extensions and run /login typesafe-jev.", "warning");
-        }
-        return;
-      }
-      missingServiceNotified = false;
-      entry.lastCheckedAt = now;
-      const startedAt = Date.now();
-      const verdict = await askJev(service, entry, log, process2, referencedObservations, now, trace);
-      entry.lastVerdict = verdict;
-      entry.verdictCount += 1;
-      entry.previousProcess = process2;
-      entry.consecutiveHigh = isHigh(verdict) ? entry.consecutiveHigh + 1 : 0;
-      const cooldownPassed = entry.lastAlertAt === void 0 || now - entry.lastAlertAt >= WATCHDOG_ALERT_COOLDOWN_MS;
-      const shouldEmit = force ? isHigh(verdict) : isDirectHigh(verdict) || entry.consecutiveHigh >= WATCHDOG_REQUIRED_CONSECUTIVE;
-      trace.record("verdict", {
-        jobId: entry.job.id,
-        pid: entry.job.pid,
-        force,
-        latencyMs: Date.now() - startedAt,
-        isHigh: isHigh(verdict),
-        isDirectHigh: isDirectHigh(verdict),
-        consecutiveHigh: entry.consecutiveHigh,
-        cooldownPassed,
-        shouldEmit,
-        ...verdictTraceFields(verdict)
-      });
-      if (shouldEmit && cooldownPassed) {
-        entry.lastAlertAt = now;
-        const evidenceTail = [
-          log.tail,
-          ...referencedObservations.map((file) => `[${file.path}]
-${file.tail}`)
-        ].filter(Boolean).join("\n");
-        alert(entry, verdict, evidenceTail);
-      } else if (shouldEmit && !cooldownPassed) {
-        trace.record("alert_suppressed", {
-          jobId: entry.job.id,
-          reason: "cooldown",
-          cooldownRemainingSeconds: Math.round(
-            (WATCHDOG_ALERT_COOLDOWN_MS - (now - (entry.lastAlertAt ?? now))) / 1e3
-          )
-        });
-      } else if (isHigh(verdict)) {
-        trace.record("alert_suppressed", {
-          jobId: entry.job.id,
-          reason: "needs_consecutive_samples",
-          consecutiveHigh: entry.consecutiveHigh,
-          required: WATCHDOG_REQUIRED_CONSECUTIVE
-        });
-      }
-      return verdict;
-    } catch (error) {
-      trace.record("error", {
-        jobId: entry.job.id,
-        pid: entry.job.pid,
-        force,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      if (force) entry.ctx.ui.notify(`Semantic watchdog check failed for ${entry.job.id}: ${error instanceof Error ? error.message : String(error)}`, "error");
-      return void 0;
-    } finally {
-      entry.checking = false;
-      schedule(entry);
-    }
-  }, "inspect");
-  return {
-    track(job, ctx, signal) {
-      if (disposed || tracked.has(job.id)) return;
-      const now = Date.now();
-      const entry = {
-        job,
-        ctx,
-        cancelled: false,
-        lastLogSize: 0,
-        lastLogGrowthAt: now,
-        referencedFileSizes: /* @__PURE__ */ new Map(),
-        referencedFileGrowthAt: /* @__PURE__ */ new Map(),
-        checking: false,
-        consecutiveHigh: 0,
-        verdictCount: 0
-      };
-      tracked.set(job.id, entry);
-      trace.record("track", {
-        jobId: job.id,
-        pid: job.pid,
-        kind: job.kind ?? "shell",
-        name: job.name ?? null,
-        persistent: job.persistent === true,
-        command: job.command,
-        logPath: job.logPath,
-        alreadyAborted: signal.aborted
-      });
-      const stop = /* @__PURE__ */ __name((reason) => {
-        entry.cancelled = true;
-        if (entry.timer) clearTimeout(entry.timer);
-        tracked.delete(job.id);
-        trace.record("stop", {
-          jobId: job.id,
-          pid: job.pid,
-          reason,
-          status: job.status,
-          exitCode: job.exitCode ?? null,
-          ageSeconds: Math.round((Date.now() - job.startTime) / 1e3),
-          verdictCount: entry.verdictCount,
-          lastVerdict: entry.lastVerdict ? verdictTraceFields(entry.lastVerdict) : null
-        });
-      }, "stop");
-      if (signal.aborted) stop("aborted_on_track");
-      else signal.addEventListener("abort", () => stop("aborted"), { once: true });
-      schedule(entry);
-    },
-    async inspectNow(jobId, ctx) {
-      const entry = tracked.get(jobId);
-      if (!entry) {
-        ctx.ui.notify(`No running watchdog job: ${jobId}`, "warning");
-        return void 0;
-      }
-      const verdict = await inspect(entry, true);
-      if (verdict) {
-        ctx.ui.notify(
-          `${jobId}: block=${verdict.stuck.toFixed(2)}, progress=${verdict.credibleProgress.toFixed(2)}, persistent=${verdict.intentionallyPersistent.toFixed(2)}, finite-wait=${verdict.validFiniteWait.toFixed(2)}, cause=${verdict.likelyCause}`,
-          isHigh(verdict) ? "warning" : "info"
-        );
-      }
-      return verdict;
-    },
-    status() {
-      return [...tracked.values()].map((entry) => ({
-        jobId: entry.job.id,
-        ageSeconds: Math.round((Date.now() - entry.job.startTime) / 1e3),
-        ...entry.lastVerdict ? { verdict: entry.lastVerdict } : {}
-      }));
-    },
-    setEnabled(value) {
-      enabled = value;
-      trace.record("set_enabled", { enabled: value, trackedJobs: tracked.size });
-      for (const entry of tracked.values()) {
-        if (entry.timer) {
-          clearTimeout(entry.timer);
-          entry.timer = void 0;
-        }
-        if (enabled && !entry.cancelled) schedule(entry);
-      }
-    },
-    isEnabled() {
-      return enabled;
-    },
-    trace,
-    dispose() {
-      disposed = true;
-      for (const entry of tracked.values()) {
-        entry.cancelled = true;
-        if (entry.timer) clearTimeout(entry.timer);
-      }
-      trace.record("watchdog_dispose", { trackedJobs: tracked.size });
-      tracked.clear();
-    }
-  };
-}
-__name(createJobWatchdog, "createJobWatchdog");
-
-// src/jobs/patty/watchdog/trace-report.ts
-import { readFile as readFile2 } from "node:fs/promises";
-var bump = /* @__PURE__ */ __name((histogram, key) => {
-  const name = typeof key === "string" && key ? key : "(unset)";
-  histogram[name] = (histogram[name] ?? 0) + 1;
-}, "bump");
-async function readWatchdogTrace(path = resolveWatchdogTracePath()) {
-  if (!path) return void 0;
-  let text;
-  try {
-    text = await readFile2(path, "utf8");
-  } catch {
-    return void 0;
-  }
-  const records = [];
-  let malformedLines = 0;
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const parsed = JSON.parse(line);
-      if (typeof parsed?.event === "string") records.push(parsed);
-      else malformedLines += 1;
-    } catch {
-      malformedLines += 1;
-    }
-  }
-  const stats2 = {
-    path,
-    totalLines: records.length + malformedLines,
-    malformedLines,
-    trackedJobs: 0,
-    polls: 0,
-    gateHistogram: {},
-    jevRequests: 0,
-    verdicts: 0,
-    highVerdicts: 0,
-    directHighVerdicts: 0,
-    alerts: 0,
-    suppressedAlerts: {},
-    jevErrors: 0,
-    missingService: 0,
-    alertCauses: {},
-    likelyCauses: {},
-    latencyMs: { count: 0 }
-  };
-  const latencies = [];
-  for (const record2 of records) {
-    stats2.firstTimestamp ??= typeof record2.ts === "string" ? record2.ts : void 0;
-    if (typeof record2.ts === "string") stats2.lastTimestamp = record2.ts;
-    switch (record2.event) {
-      case "track":
-        stats2.trackedJobs += 1;
-        break;
-      case "poll":
-        stats2.polls += 1;
-        bump(stats2.gateHistogram, record2.gate);
-        break;
-      case "jev_request":
-        stats2.jevRequests += 1;
-        break;
-      case "verdict":
-        stats2.verdicts += 1;
-        if (record2.isHigh === true) stats2.highVerdicts += 1;
-        if (record2.isDirectHigh === true) stats2.directHighVerdicts += 1;
-        bump(stats2.likelyCauses, record2.likelyCause);
-        if (typeof record2.latencyMs === "number") latencies.push(record2.latencyMs);
-        break;
-      case "alert":
-        stats2.alerts += 1;
-        bump(stats2.alertCauses, record2.likelyCause);
-        break;
-      case "alert_suppressed":
-        bump(stats2.suppressedAlerts, record2.reason);
-        break;
-      case "error":
-        stats2.jevErrors += 1;
-        break;
-      case "no_service":
-        stats2.missingService += 1;
-        break;
-      default:
-        break;
-    }
-  }
-  if (stats2.firstTimestamp && stats2.lastTimestamp) {
-    const span = (Date.parse(stats2.lastTimestamp) - Date.parse(stats2.firstTimestamp)) / 1e3;
-    if (Number.isFinite(span)) stats2.spanSeconds = Math.round(span);
-  }
-  if (latencies.length) {
-    const sorted = [...latencies].sort((a, b) => a - b);
-    stats2.latencyMs = {
-      count: sorted.length,
-      min: sorted[0],
-      max: sorted[sorted.length - 1],
-      mean: Math.round(sorted.reduce((sum, value) => sum + value, 0) / sorted.length),
-      p95: sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)]
-    };
-  }
-  return { stats: stats2, records };
-}
-__name(readWatchdogTrace, "readWatchdogTrace");
-function histogramLines(histogram, indent = "  ") {
-  const entries = Object.entries(histogram).sort(([, a], [, b]) => b - a);
-  if (!entries.length) return [`${indent}(none)`];
-  return entries.map(([key, count]) => `${indent}${key}: ${count}`);
-}
-__name(histogramLines, "histogramLines");
-function formatWatchdogTraceStats(stats2) {
-  const latency = stats2.latencyMs.count ? `min=${stats2.latencyMs.min}ms mean=${stats2.latencyMs.mean}ms p95=${stats2.latencyMs.p95}ms max=${stats2.latencyMs.max}ms` : "(no samples)";
-  const span = stats2.spanSeconds === void 0 ? "n/a" : `${Math.floor(stats2.spanSeconds / 3600)}h${Math.floor(stats2.spanSeconds % 3600 / 60)}m`;
-  return [
-    `Watchdog trace: ${stats2.path}`,
-    `Window: ${stats2.firstTimestamp ?? "n/a"} \u2192 ${stats2.lastTimestamp ?? "n/a"} (${span})`,
-    `Records: ${stats2.totalLines}${stats2.malformedLines ? ` (${stats2.malformedLines} malformed)` : ""}`,
-    `Jobs tracked: ${stats2.trackedJobs} | polls: ${stats2.polls} | Jev requests: ${stats2.jevRequests}`,
-    `Verdicts: ${stats2.verdicts} (high ${stats2.highVerdicts}, direct-high ${stats2.directHighVerdicts})`,
-    `Alerts: ${stats2.alerts} | Jev errors: ${stats2.jevErrors} | missing service: ${stats2.missingService}`,
-    `Jev latency: ${latency}`,
-    "Poll gate histogram:",
-    ...histogramLines(stats2.gateHistogram),
-    "Alert causes:",
-    ...histogramLines(stats2.alertCauses),
-    "Suppressed alerts:",
-    ...histogramLines(stats2.suppressedAlerts),
-    "Verdict likely-cause histogram:",
-    ...histogramLines(stats2.likelyCauses)
-  ].join("\n");
-}
-__name(formatWatchdogTraceStats, "formatWatchdogTraceStats");
-
 // src/jobs/runtime.ts
 function jobRuntimeEnabled() {
   return process.env.PI_SUBAGENTS_JOB_RUNTIME !== "0";
@@ -10600,7 +9657,6 @@ var JobRuntime = class {
   }
   installRoot() {
     this.registry.nonInteractive = detectNonInteractive(process.argv, !!process.stdin.isTTY);
-    this.registry.watchdog = this.createWatchdog();
     this.install(this.pi, this.root);
     registerCommands(this.pi, this.registry);
     registerShortcuts(this.pi, this.registry);
@@ -10612,48 +9668,11 @@ var JobRuntime = class {
         return new Text3(theme.fg(colour, `${owner}${details?.summary ?? String(message.content)}`), 0, 0);
       });
     }
-    this.pi.registerCommand("stuck-watchdog", {
-      description: "Inspect or toggle unified Jev-based semantic stall detection",
-      handler: /* @__PURE__ */ __name(async (args, ctx) => {
-        const [action = "status", id] = args.trim().split(/\s+/, 2);
-        const watchdog = this.registry.watchdog;
-        if (action === "on" || action === "off") {
-          watchdog.setEnabled(action === "on");
-          ctx.ui.notify(`Semantic stuck watchdog ${action === "on" ? "enabled" : "disabled; no jobs were changed"}.`, "info");
-          return;
-        }
-        if (action === "check") {
-          if (!id) {
-            ctx.ui.notify("Usage: /stuck-watchdog check <job-id>", "warning");
-            return;
-          }
-          await watchdog.inspectNow(id, ctx);
-          return;
-        }
-        if (action === "log" || action === "stats") {
-          const path = watchdog.trace?.path;
-          if (!path) {
-            ctx.ui.notify("Watchdog tracing is disabled (PI_PATTY_WATCHDOG_LOG=0).", "warning");
-            return;
-          }
-          const report = await readWatchdogTrace(path);
-          ctx.ui.notify(report ? formatWatchdogTraceStats(report.stats) : `No watchdog trace yet at ${path}.`, "info");
-          return;
-        }
-        const items = watchdog.status();
-        const lines = items.map((item) => `${item.jobId} age=${item.ageSeconds}s${item.verdict ? ` stuck=${item.verdict.stuck.toFixed(2)} cause=${item.verdict.likelyCause}` : " unchecked"}`);
-        ctx.ui.notify(`Semantic stuck watchdog is ${watchdog.isEnabled() ? "on" : "off"}. Tracking ${items.length} job(s).${lines.length ? `
-${lines.join("\n")}` : ""}
-Trace: ${watchdog.trace?.path ?? "disabled"} (use /stuck-watchdog stats)`, "info");
-      }, "handler")
-    });
     this.pi.on("session_start", async (_event, ctx) => {
       if (this.registry.disposed) {
         if ([...this.storage.values()].some((job) => job.status === "running")) throw new Error("Cannot restart job runtime while old jobs remain unconfirmed");
         this.registry.generation++;
         this.registry.disposed = false;
-        this.registry.watchdog = this.createWatchdog();
-        for (const owner of this.owners.values()) owner.registry.watchdog = this.registry.watchdog;
       }
       this.ctx = ctx;
       this.root.sessionId = ctx.sessionManager.getSessionId();
@@ -10668,17 +9687,6 @@ Trace: ${watchdog.trace?.path ?? "disabled"} (use /stuck-watchdog stats)`, "info
    * no second manager, and no global lookup that can bind to the wrong parent. */
   childExtension(agentId) {
     return { name: JOB_RUNTIME_EXTENSION, factory: /* @__PURE__ */ __name((pi) => this.install(pi, this.owner(agentId)), "factory") };
-  }
-  createWatchdog() {
-    const sendMessage = /* @__PURE__ */ __name((message, options) => {
-      const details = message.details;
-      const job = details?.jobId ? this.storage.get(details.jobId) : void 0;
-      if (details?.jobId && !job) return;
-      const agentId = job?.ownerAgentId;
-      if (agentId) this.owners.get(agentId)?.deliverNotice?.(message, options);
-      else this.pi.sendMessage(message, options);
-    }, "sendMessage");
-    return createJobWatchdog(new Proxy(this.pi, { get: /* @__PURE__ */ __name((target, key) => key === "sendMessage" ? sendMessage : Reflect.get(target, key), "get") }), this.registry);
   }
   install(pi, owner) {
     const registerTool = /* @__PURE__ */ __name((tool) => {
@@ -10710,7 +9718,6 @@ Trace: ${watchdog.trace?.path ?? "disabled"} (use /stuck-watchdog stats)`, "info
       return Reflect.get(target, key);
     }, "get") });
     const reg = owner.registry;
-    reg.watchdog = this.registry.watchdog;
     registerBashTool(scopedPi, reg, createBashToolDefinition(process.cwd()));
     if (process.platform === "win32") registerBashTool(scopedPi, reg, createPowerShellToolDefinition(process.cwd()), "powershell");
     registerBashBgTool(scopedPi, reg);
@@ -10829,7 +9836,6 @@ Trace: ${watchdog.trace?.path ?? "disabled"} (use /stuck-watchdog stats)`, "info
     const stopped = await this.stopAll();
     this.registry.disposed = true;
     this.registry.generation++;
-    this.registry.watchdog?.dispose();
     this.registry.onChange?.();
     this.ctx = void 0;
     if (!stopped) throw new Error("Job termination unconfirmed at shutdown; captures retained and live worktrees must not be removed");
@@ -11237,8 +10243,8 @@ var SubagentScheduler = class _SubagentScheduler {
 };
 
 // src/schedule-store.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync7, readFileSync as readFileSync7, renameSync as renameSync3, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname6, join as join13 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync7, renameSync as renameSync2, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname6, join as join12 } from "node:path";
 var LOCK_RETRY_MS = 50;
 var LOCK_MAX_RETRIES = 100;
 function isProcessRunning(pid) {
@@ -11284,7 +10290,7 @@ function releaseLock(lockPath) {
 }
 __name(releaseLock, "releaseLock");
 function resolveStorePath(cwd, sessionId) {
-  return join13(cwd, ".pi", "subagent-schedules", `${sessionId}.json`);
+  return join12(cwd, ".pi", "subagent-schedules", `${sessionId}.json`);
 }
 __name(resolveStorePath, "resolveStorePath");
 var ScheduleStore = class {
@@ -11301,7 +10307,7 @@ var ScheduleStore = class {
   }
   /** Create the backing directory lazily — only when we're about to persist. */
   ensureDir() {
-    mkdirSync7(dirname6(this.filePath), { recursive: true });
+    mkdirSync6(dirname6(this.filePath), { recursive: true });
   }
   /** Load from disk into the in-memory cache. Silent on parse errors. */
   load() {
@@ -11318,7 +10324,7 @@ var ScheduleStore = class {
     const data = { version: 1, jobs: [...this.jobs.values()] };
     const tmp = this.filePath + ".tmp";
     writeFileSync4(tmp, JSON.stringify(data, null, 2));
-    renameSync3(tmp, this.filePath);
+    renameSync2(tmp, this.filePath);
   }
   /** Acquire lock → reload → mutate → save → release. */
   withLock(fn) {
@@ -11379,8 +10385,8 @@ var ScheduleStore = class {
 
 // src/settings.ts
 init_agent_types();
-import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync8, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname7, join as join14 } from "node:path";
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname7, join as join13 } from "node:path";
 import { getAgentDir as getAgentDir8 } from "@earendil-works/pi-coding-agent";
 var VALID_JOIN_MODES = /* @__PURE__ */ new Set(["async", "group", "smart"]);
 var VALID_TOOL_DESCRIPTION_MODES = /* @__PURE__ */ new Set(["full", "compact", "custom"]);
@@ -11475,11 +10481,11 @@ function sanitize(raw) {
 }
 __name(sanitize, "sanitize");
 function globalPath() {
-  return join14(getAgentDir8(), "subagents.json");
+  return join13(getAgentDir8(), "subagents.json");
 }
 __name(globalPath, "globalPath");
 function projectPath(cwd) {
-  return join14(cwd, ".pi", "subagents.json");
+  return join13(cwd, ".pi", "subagents.json");
 }
 __name(projectPath, "projectPath");
 function readSettingsFile(path) {
@@ -11500,7 +10506,7 @@ __name(loadSettings, "loadSettings");
 function saveSettings(s, cwd = process.cwd()) {
   const path = projectPath(cwd);
   try {
-    mkdirSync8(dirname7(path), { recursive: true });
+    mkdirSync7(dirname7(path), { recursive: true });
     writeFileSync5(path, JSON.stringify(s, null, 2), "utf-8");
     return true;
   } catch {
@@ -12412,14 +11418,14 @@ init_user_steer();
 init_agent_widget();
 
 // src/ui/job-log-view.ts
-import { open as open2 } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { setImmediate as yieldTurn } from "node:timers/promises";
 import { Input as Input2, isKeyRelease as isKeyRelease2, matchesKey as matchesKey3, stripTerminalSequences, truncateToWidth as truncateToWidth2, visibleWidth } from "@earendil-works/pi-tui";
 var JOB_LOG_PAGE_BYTES = 64 * 1024;
 var SEARCH_BYTES = 16 * 1024 * 1024;
 var QUERY_CHARS = 256;
 async function readPage(path, position) {
-  const file = await open2(path, "r");
+  const file = await open(path, "r");
   try {
     const { size } = await file.stat();
     const start = Math.max(0, Math.min(position ?? Math.max(0, size - JOB_LOG_PAGE_BYTES), size));
@@ -13063,9 +12069,9 @@ var FleetList = class {
    * switched off never calls this, and the roster is agents-only exactly as
    * before.
    */
-  setWorkflowSource(source, open3) {
+  setWorkflowSource(source, open2) {
     this.workflowSource = source;
-    this.openWorkflow = open3;
+    this.openWorkflow = open2;
   }
   /** Live runs, plus recently settled ones — the same linger the agents get. */
   workflows() {
@@ -14868,8 +13874,8 @@ import { existsSync as existsSync11 } from "node:fs";
 
 // src/workflow/saved.ts
 init_memory();
-import { existsSync as existsSync10, readdirSync as readdirSync3, readFileSync as readFileSync10, statSync as statSync8 } from "node:fs";
-import { isAbsolute as isAbsolute5, join as join15 } from "node:path";
+import { existsSync as existsSync10, readdirSync as readdirSync3, readFileSync as readFileSync10, statSync as statSync7 } from "node:fs";
+import { isAbsolute as isAbsolute5, join as join14 } from "node:path";
 import { getAgentDir as getAgentDir9 } from "@earendil-works/pi-coding-agent";
 
 // src/workflow/meta.ts
@@ -14886,9 +13892,9 @@ function hasMetaDeclaration(source) {
   return META_DECLARATION.test(source);
 }
 __name(hasMetaDeclaration, "hasMetaDeclaration");
-function scanObjectLiteral(source, open3) {
+function scanObjectLiteral(source, open2) {
   let depth = 0;
-  let i = open3;
+  let i = open2;
   let sawInterpolation = false;
   let mode = "code";
   const templateStack = [];
@@ -15033,14 +14039,14 @@ function extractMeta(source) {
       "A workflow script must begin with `export const meta = { name, description }`.\n" + PURE_LITERAL_HINT
     );
   }
-  const open3 = source.indexOf("{", declaration.index + declaration[0].length);
-  if (open3 === -1) fail("`export const meta` must be assigned an object literal.\n" + PURE_LITERAL_HINT);
-  const { end: close, sawInterpolation } = scanObjectLiteral(source, open3);
+  const open2 = source.indexOf("{", declaration.index + declaration[0].length);
+  if (open2 === -1) fail("`export const meta` must be assigned an object literal.\n" + PURE_LITERAL_HINT);
+  const { end: close, sawInterpolation } = scanObjectLiteral(source, open2);
   if (close === -1) fail("`meta` object literal is never closed \u2014 check for an unbalanced `{`.");
   if (sawInterpolation) {
     fail("`meta` must not use template interpolation (`${...}`).\n" + PURE_LITERAL_HINT);
   }
-  const fragment = source.slice(open3, close);
+  const fragment = source.slice(open2, close);
   let value;
   try {
     value = new Script(`(${fragment})`, { filename: "workflow-meta.js" }).runInContext(createContext({}), { timeout: META_EVAL_TIMEOUT_MS });
@@ -15105,7 +14111,7 @@ import { Worker } from "node:worker_threads";
 
 // src/workflow/journal.ts
 import { createHash as createHash2 } from "node:crypto";
-import { appendFileSync as appendFileSync4, readFileSync as readFileSync9 } from "node:fs";
+import { appendFileSync as appendFileSync3, readFileSync as readFileSync9 } from "node:fs";
 function journalKey(input) {
   const canonical = JSON.stringify([
     input.prompt,
@@ -15149,7 +14155,7 @@ function readJournal(path) {
 __name(readJournal, "readJournal");
 function appendJournal(path, entry) {
   try {
-    appendFileSync4(path, `${JSON.stringify(entry)}
+    appendFileSync3(path, `${JSON.stringify(entry)}
 `, "utf-8");
   } catch {
   }
@@ -16522,9 +15528,9 @@ __name(runWorkflow, "runWorkflow");
 var WORKFLOW_EXTENSION = ".js";
 function savedWorkflowRoots(cwd) {
   return [
-    join15(cwd, ".pi", "workflows"),
-    join15(cwd, ".agents", "workflows"),
-    join15(getAgentDir9(), "workflows")
+    join14(cwd, ".pi", "workflows"),
+    join14(cwd, ".agents", "workflows"),
+    join14(getAgentDir9(), "workflows")
   ];
 }
 __name(savedWorkflowRoots, "savedWorkflowRoots");
@@ -16539,7 +15545,7 @@ function readSavedWorkflow(name, cwd) {
   const roots = savedWorkflowRoots(cwd);
   for (const root of roots) {
     if (isSymlink(root)) continue;
-    const path = join15(root, `${trimmed}${WORKFLOW_EXTENSION}`);
+    const path = join14(root, `${trimmed}${WORKFLOW_EXTENSION}`);
     const script = safeReadFile(path);
     if (script === void 0) continue;
     if (!hasMetaDeclaration(script)) {
@@ -16560,7 +15566,7 @@ __name(readSavedWorkflow, "readSavedWorkflow");
 function resolveWorkflowSource(ref, cwd) {
   const path = ref.scriptPath?.trim();
   if (path !== void 0 && path !== "") {
-    const resolved = isAbsolute5(path) ? path : join15(cwd, path);
+    const resolved = isAbsolute5(path) ? path : join14(cwd, path);
     try {
       return { ok: true, script: readFileSync10(resolved, "utf-8"), path: resolved };
     } catch (err) {
@@ -16589,7 +15595,7 @@ function listSavedWorkflows(cwd) {
       if (!entry.endsWith(WORKFLOW_EXTENSION)) continue;
       const name = entry.slice(0, -WORKFLOW_EXTENSION.length);
       if (isUnsafeName(name)) continue;
-      if (isWorkflowFile(join15(root, entry))) names.add(name);
+      if (isWorkflowFile(join14(root, entry))) names.add(name);
     }
   }
   return [...names].sort();
@@ -16597,7 +15603,7 @@ function listSavedWorkflows(cwd) {
 __name(listSavedWorkflows, "listSavedWorkflows");
 function isWorkflowFile(path) {
   try {
-    if (statSync8(path).size > MAX_SCRIPT_LENGTH) return false;
+    if (statSync7(path).size > MAX_SCRIPT_LENGTH) return false;
   } catch {
     return false;
   }
@@ -18133,8 +17139,8 @@ Terse command-style prompts produce shallow, generic work.
   }, "renderToolDescriptionTemplate");
   const loadCustomToolDescription = /* @__PURE__ */ __name(() => {
     for (const path of [
-      join16(process.cwd(), ".pi", "agent-tool-description.md"),
-      join16(getAgentDir10(), "agent-tool-description.md")
+      join15(process.cwd(), ".pi", "agent-tool-description.md"),
+      join15(getAgentDir10(), "agent-tool-description.md")
     ]) {
       try {
         if (!existsSync12(path)) continue;
@@ -18807,9 +17813,9 @@ Do not duplicate this agent's work.`,
       let journalPath;
       try {
         const dir = sessionTaskDir(ctx.cwd, ctx.sessionManager.getSessionId());
-        savedPath = join16(dir, `${runId}.workflow.js`);
+        savedPath = join15(dir, `${runId}.workflow.js`);
         writeFileSync6(savedPath, resolved.script, "utf-8");
-        journalPath = join16(dir, `${runId}.workflow.jsonl`);
+        journalPath = join15(dir, `${runId}.workflow.jsonl`);
       } catch (err) {
         savedPath = void 0;
         journalPath = void 0;
@@ -18903,7 +17909,7 @@ To iterate, edit the script file and call SubagentWorkflow again with scriptPath
       report(`--${WORKFLOW_FILE_FLAG} needs a path: --${WORKFLOW_FILE_FLAG}=<path>`, "warning");
       return;
     }
-    const path = isAbsolute6(flag.trim()) ? flag.trim() : join16(ctx.cwd, flag.trim());
+    const path = isAbsolute6(flag.trim()) ? flag.trim() : join15(ctx.cwd, flag.trim());
     let script;
     try {
       script = readFileSync11(path, "utf-8");
@@ -19433,8 +18439,8 @@ Current state: ${stateParts.join(" \xB7 ")}`
     ]);
     if (!location) return;
     const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-    mkdirSync9(targetDir, { recursive: true });
-    const targetPath = join16(targetDir, `${name}.md`);
+    mkdirSync8(targetDir, { recursive: true });
+    const targetPath = join15(targetDir, `${name}.md`);
     if (existsSync12(targetPath)) {
       const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
       if (!overwrite) return;
@@ -19471,8 +18477,8 @@ Current state: ${stateParts.join(" \xB7 ")}`
     ]);
     if (!location) return;
     const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
-    mkdirSync9(targetDir, { recursive: true });
-    const targetPath = join16(targetDir, `${name}.md`);
+    mkdirSync8(targetDir, { recursive: true });
+    const targetPath = join15(targetDir, `${name}.md`);
     const { writeFileSync: writeFileSync7 } = await import("node:fs");
     writeFileSync7(targetPath, "---\nenabled: false\n---\n", "utf-8");
     reloadCustomAgents();
@@ -19524,8 +18530,8 @@ Current state: ${stateParts.join(" \xB7 ")}`
     if (!description) return;
     const name = await ctx.ui.input("Agent name (filename, no spaces)");
     if (!name) return;
-    mkdirSync9(targetDir, { recursive: true });
-    const targetPath = join16(targetDir, `${name}.md`);
+    mkdirSync8(targetDir, { recursive: true });
+    const targetPath = join15(targetDir, `${name}.md`);
     if (existsSync12(targetPath)) {
       const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
       if (!overwrite) return;
@@ -19642,8 +18648,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
       thinking: thinkingChoice === "inherit" ? void 0 : thinkingChoice,
       systemPrompt
     });
-    mkdirSync9(targetDir, { recursive: true });
-    const targetPath = join16(targetDir, `${name}.md`);
+    mkdirSync8(targetDir, { recursive: true });
+    const targetPath = join15(targetDir, `${name}.md`);
     if (existsSync12(targetPath)) {
       const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
       if (!overwrite) return;
