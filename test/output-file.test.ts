@@ -130,6 +130,27 @@ describe("streamToOutputFile", () => {
     expect(entries.every((e) => e.cwd === "/work")).toBe(true);
   });
 
+  it("skips the leading system record and never re-emits the prompt a spawn already wrote", () => {
+    // Pi prepares a run as [system, user prompt, ...], and the spawn wrote the
+    // prompt as the initial entry — both messages only exist once it runs.
+    // Assuming messages[0] was the prompt duplicated it and turned the system
+    // record into a `toolResult` (#365).
+    const session = makeFakeSession([
+      { role: "system", content: "temporary system instructions" },
+      { role: "user", content: "do the thing" },
+    ]);
+    streamToOutputFile(session as never, outPath, "agent-1", "/work");
+
+    session.push({ role: "assistant", content: [{ type: "text", text: "ok" }] });
+    session.fire({ type: "turn_end" });
+
+    const entries = readEntries();
+    expect(entries.map((e) => e.type)).toEqual(["user", "assistant"]);
+    expect(JSON.stringify(entries)).not.toContain("temporary system instructions");
+    // The prompt appears exactly once, as the initial entry.
+    expect(entries.filter((e) => JSON.stringify(e.message).includes("do the thing"))).toHaveLength(1);
+  });
+
   it("never re-emits messages already flushed on a previous turn_end", () => {
     const session = makeFakeSession([{ role: "user", content: "go" }]);
     streamToOutputFile(session as never, outPath, "agent-1", "/work");

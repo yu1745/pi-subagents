@@ -1,9 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
+import { registerAgents } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import { JobRuntime } from "../src/jobs/runtime.js";
 import type { AgentRecord } from "../src/types.js";
 
@@ -867,6 +869,37 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(manager.listAgents()).toEqual([]);
     // runAgent never invoked — strict, no silent fallback
     expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("applies an agent file's isolation: worktree where the caller passes none", async () => {
+    // Mentions pass no isolation and RPC forwards only its caller's value, so the
+    // manager resolves the file itself — otherwise an `isolation: worktree` agent
+    // reached through either path ran in the main checkout.
+    const { createWorktree } = await import("../src/worktree.js");
+    const wt = { path: "/wt/file", branch: "pi-agent-file", baseSha: "abc", workPath: "/wt/file" };
+    vi.mocked(createWorktree).mockResolvedValueOnce(wt as never);
+
+    const dir = mkdtempSync(join(tmpdir(), "am-file-isolation-"));
+    mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "agents", "tree-bound.md"),
+      "---\ndescription: tree-bound\nisolation: worktree\n---\nbody\n");
+    registerAgents(loadCustomAgents(dir));
+    try {
+      manager = new AgentManager();
+      const id = manager.spawn(mockPi, mockCtx, "tree-bound", "p", { description: "x", isBackground: true });
+      await manager.awaitStartup(id);
+
+      expect(createWorktree).toHaveBeenCalled();
+      // The widget's worktree tag reads this; a caller that resolved the file
+      // itself seeded it, the mention and RPC paths did not.
+      expect(manager.getRecord(id)?.invocation?.isolation).toBe("worktree");
+    } finally {
+      // `mockResolvedValueOnce` is a queue: a failure that never reaches the
+      // call would otherwise hand this worktree to the next test.
+      vi.mocked(createWorktree).mockReset();
+      registerAgents(new Map());
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("a foreground spawn surfaces the same failure by rejecting spawnAndWait", async () => {

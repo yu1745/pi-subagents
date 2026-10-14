@@ -20,7 +20,9 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { runAgent } from "../src/agent-runner.js";
+import { GroupJoinManager } from "../src/group-join.js";
 import subagentsExtension from "../src/index.js";
+import { AgentWidget } from "../src/ui/agent-widget.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -140,5 +142,25 @@ describe("FleetView wiring (real extension lifecycle)", () => {
 
     await lifecycle.get("session_shutdown")?.({}, ctxWith(uiCtx()));
     expect(ui.setWidget).toHaveBeenCalledWith("fleet", undefined); // dispose cleared it
+  });
+
+  it("releases the activation-owned widget and group joins on shutdown, not on a session switch", async () => {
+    // Both live as long as the ACTIVATION, and the process outlives one (/reload,
+    // session replacement): the widget's 80ms render interval and a group join's
+    // pending timeouts would otherwise keep firing into the session that follows (#256).
+    const widgetDispose = vi.spyOn(AgentWidget.prototype, "dispose");
+    const joinDispose = vi.spyOn(GroupJoinManager.prototype, "dispose");
+    const { pi, lifecycle } = makePi();
+    subagentsExtension(pi);
+    await lifecycle.get("tool_execution_start")?.({}, ctxWith(uiCtx()));
+
+    // A switch keeps this activation, and both are still in use afterwards.
+    await lifecycle.get("session_before_switch")?.({}, ctxWith(uiCtx()));
+    expect(widgetDispose).not.toHaveBeenCalled();
+    expect(joinDispose).not.toHaveBeenCalled();
+
+    await lifecycle.get("session_shutdown")?.({}, ctxWith(uiCtx()));
+    expect(widgetDispose).toHaveBeenCalledTimes(1);
+    expect(joinDispose).toHaveBeenCalledTimes(1);
   });
 });

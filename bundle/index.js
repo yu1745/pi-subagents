@@ -1252,11 +1252,17 @@ function writeInitialEntry(path, agentId, prompt, cwd) {
   writeFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
 }
 function streamToOutputFile(session, path, agentId, cwd, startIndex) {
-  let writtenCount = startIndex ?? 1;
+  let writtenCount = startIndex;
   const flush = /* @__PURE__ */ __name(() => {
     const messages = session.messages;
+    if (writtenCount === void 0) {
+      const prompt = messages.findIndex((m) => m.role === "user");
+      if (prompt === -1) return;
+      writtenCount = prompt + 1;
+    }
     while (writtenCount < messages.length) {
-      const msg = messages[writtenCount];
+      const msg = messages[writtenCount++];
+      if (msg.role === "system") continue;
       const entry = {
         isSidechain: true,
         agentId,
@@ -1269,7 +1275,6 @@ function streamToOutputFile(session, path, agentId, cwd, startIndex) {
         appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
       } catch {
       }
-      writtenCount++;
     }
   }, "flush");
   const unsubscribe = session.subscribe((event) => {
@@ -2356,9 +2361,10 @@ async function runAgent(ctx, type, prompt, options) {
   const extras = {};
   if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
   if (options.workflow && !options.structuredOutput) extras.workflowChild = true;
-  const extensions = options.isolated ? false : config.extensions;
-  const excludeExtensions = options.isolated ? void 0 : config.excludeExtensions;
-  const skills = options.isolated ? false : config.skills;
+  const isolated = agentConfig?.isolated ?? options.isolated;
+  const extensions = isolated ? false : config.extensions;
+  const excludeExtensions = isolated ? void 0 : config.excludeExtensions;
+  const skills = isolated ? false : config.skills;
   if (Array.isArray(skills)) {
     const loaded = preloadSkills(skills, configCwd);
     if (loaded.length > 0) {
@@ -2392,7 +2398,7 @@ async function runAgent(ctx, type, prompt, options) {
   const noSkills = skills === false || Array.isArray(skills);
   const agentDir = getAgentDir6();
   const { extNames, narrowing } = parseExtSelectors(
-    options.isolated ? [] : agentConfig?.extSelectors ?? []
+    isolated ? [] : agentConfig?.extSelectors ?? []
   );
   const noExtensions = extensions === false;
   const extensionsSpec = Array.isArray(extensions) ? parseExtensionsSpec(extensions, configCwd) : void 0;
@@ -2485,7 +2491,7 @@ async function runAgent(ctx, type, prompt, options) {
   const disallowedSet = agentConfig?.disallowedTools ? new Set(agentConfig.disallowedTools) : void 0;
   const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
   const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth ? options.nestedRuntime : void 0;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated ? createNestedSubagentTools({
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated ? createNestedSubagentTools({
     manager: nestedRuntime.manager,
     pi: options.pi,
     parentAgentId: nestedRuntime.parentAgentId,
@@ -4685,8 +4691,9 @@ var init_agent_manager = __esm({
             throw error;
           }
         }
+        const isolation = options.workflowId !== void 0 ? options.isolation : getAgentConfig(type)?.isolation ?? options.isolation;
         let worktreeCwd;
-        if (options.isolation === "worktree" && isWorktreeIsolationEnabled()) {
+        if (isolation === "worktree" && isWorktreeIsolationEnabled()) {
           const wt = await createWorktree(pi, baseCwd, id);
           if (!wt) {
             releaseSlot();
@@ -4697,6 +4704,8 @@ var init_agent_manager = __esm({
           record2.worktree = wt;
           worktreeCwd = customCwd !== void 0 ? wt.workPath : wt.path;
           this.worktreeRepos.add(baseCwd);
+          record2.invocation ??= {};
+          record2.invocation.isolation = "worktree";
           if (record2.status !== "running" || this.disposed) {
             releaseSlot();
             this.inFlight.delete(id);
@@ -15789,6 +15798,10 @@ function createWorkflowHost(deps) {
           request.prompt,
           {
             description: request.label,
+            // Same as the Agent tool: `isolated` comes off the agent definition.
+            // Left out, a hermetic agent's script-spawned children loaded every
+            // host extension and picked up its MCP and web tools.
+            ...config?.isolated !== void 0 ? { isolated: config.isolated } : {},
             // The stamp is what keeps this child out of the session's
             // `maxConcurrent` pool — see `occupiesPoolSlot`. The run already
             // bounds how many of its agents run at once, and counting them
@@ -16735,6 +16748,8 @@ Use get_subagent_result for full output.`,
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     fleet.dispose();
+    widget.dispose();
+    groupJoin.dispose();
     try {
       await manager.dispose(pi);
     } finally {

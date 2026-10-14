@@ -88,7 +88,8 @@ vi.mock("../src/agent-types.js", () => ({
     promptMode: "replace",
     inheritContext: false,
     runInBackground: false,
-    isolated: false,
+    // `isolated` deliberately unset: a real agent file that omits it leaves the
+    // decision to the caller, and frontmatter wins only when it sets one.
   })),
   getMemoryToolNames: vi.fn(() => []),
   getReadOnlyMemoryToolNames: vi.fn(() => []),
@@ -858,7 +859,9 @@ function makeAgentConfig(overrides: Record<string, unknown> = {}) {
     promptMode: "replace" as const,
     inheritContext: false,
     runInBackground: false,
-    isolated: false,
+    // No `isolated`: an agent file that omits it leaves the flag to the caller,
+    // so these fixtures exercise the `Agent` tool parameter as production does.
+    // Tests that want the file's value set `isolated` explicitly.
     ...overrides,
   };
 }
@@ -1546,6 +1549,27 @@ describe("agent-runner master tool allowlist", () => {
 
     expect(createNestedSubagentTools).not.toHaveBeenCalled();
     expect(lastToolsPassed()).not.toContain("Agent");
+  });
+
+  it("builds the hermetic session from an isolated agent file without a caller opt-in", async () => {
+    // `@handle` mentions and RPC spawns pass no `isolated`; the runner resolves
+    // the agent file itself, so its value holds on every spawn path.
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: true, isolated: true, allowedSubagents: "all" }),
+    );
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      // A caller's explicit `false` must not override the file's `true`.
+      isolated: false,
+      nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+    });
+
+    expect(lastLoaderOpts().noExtensions).toBe(true);
+    expect(createNestedSubagentTools).not.toHaveBeenCalled();
   });
 
   it("passes the inherited depth cap through to the nested tools", async () => {

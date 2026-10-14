@@ -12,7 +12,7 @@ This fork (`yu1745/pi-subagents`) is maintained independently for a parent-super
 
 ## Releases and tags
 
-Tags are named after the **exact Pi version the build targets**, not after the plugin's own version: `v1.2.0` is the build whose native viewer patch is coupled to Pi 1.2.0. This is why the native viewer tells a mismatched host to "use the plugin tag matching your Pi version" — a hard-coupled patch cannot be selected by a semver range, so the tag carries the Pi version and the plugin version (`package.json`, the `## [x.y.z]` CHANGELOG section) carries the fork's own progress. Plain `v0.x.y` tags in this checkout belong to upstream and are not fork releases.
+Tags are named after the **exact Pi version the build targets**, not after the plugin's own version: `v1.2.0` is the build whose native viewer patch is coupled to Pi 1.2.0. This is why the native viewer tells a mismatched host to "use the plugin tag matching your Pi version" — a hard-coupled patch cannot be selected by a semver range, so the tag carries the Pi version and the plugin version (`package.json`, the `## [x.y.z]` CHANGELOG section) carries the fork's own progress. Plain `v0.x.y` tags in this checkout belong to upstream and are not fork releases. Because the tag names the Pi version alone, a second release for the same Pi version takes an ordinal suffix: the first is `v1.2.0`, the next `v1.2.0-2`, and so on.
 
 Per release: bump `package.json`, move the `CHANGELOG.md` `[Unreleased]` entries into a version section, pin `@earendil-works/pi-*` devDependencies to the target Pi release, rebuild `bundle/index.js`, then run `npm run check`, `npm run test:e2e` and `npm run build` before tagging. Announce the Pi version the tag targets in the tag message.
 

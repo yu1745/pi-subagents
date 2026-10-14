@@ -1137,6 +1137,12 @@ export default function (pi: ExtensionAPI) {
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     fleet.dispose();
+    // Activation-owned, and this process outlives an activation (/reload, a new
+    // session): the widget's render interval and a group join's pending timeouts
+    // would otherwise keep firing into whatever session comes next. Not in
+    // `session_before_switch`, which keeps this activation and both in use.
+    widget.dispose();
+    groupJoin.dispose();
     // Awaited: it emits `session_shutdown` into every retained child session so
     // extensions bound there can release what they armed in `session_start` (#242).
     // pi awaits this handler, and the process exits right after — unawaited, those

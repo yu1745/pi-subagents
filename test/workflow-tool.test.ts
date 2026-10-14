@@ -141,6 +141,32 @@ describe("createWorkflowHost — spawn mapping", () => {
     expect(options.rootSessionId).toBe("root-1");
   });
 
+  it("forwards an agent file's isolated: true to the child it spawns", async () => {
+    // The Agent tool resolves `isolated` off the agent definition; without this
+    // the workflow path silently dropped it, so a hermetic read-only agent that a
+    // script spawned loaded every host extension and picked up its MCP and web
+    // tools (#339).
+    registerAgents(new Map([["hermetic", {
+      name: "hermetic",
+      displayName: "Hermetic",
+      description: "an agent with a hermetic boundary",
+      isolated: true,
+      extensions: false,
+      skills: false,
+      promptMode: "replace",
+    } as any]]));
+    const stub = stubManager();
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+
+    await host.spawnAgent(request({ agentType: "hermetic" }));
+    expect(stub.spawnAndWait.mock.calls[0][4].isolated).toBe(true);
+
+    // An agent that leaves it unset passes nothing, so the spawn keeps its own
+    // default rather than receiving an explicit `false`.
+    await host.spawnAgent(request({ agentType: "general-purpose" }));
+    expect(stub.spawnAndWait.mock.calls[1][4]).not.toHaveProperty("isolated");
+  });
+
   it("routes an unknown agent type through the same dispatch the Agent tool uses", async () => {
     // Not a second resolution path: `resolveSpawnType` owns the fallback policy,
     // so an unknown type falls back here exactly as it does for a tool call…
