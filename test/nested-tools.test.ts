@@ -293,6 +293,26 @@ describe("child-safe nested Agent tools", () => {
     expect(manager.resume).not.toHaveBeenCalled();
   });
 
+  it("forwards the resumed agent file's turn limit, and the call's when the file has none", async () => {
+    writeAgent("capped", "max_turns: 3\n");
+    records.set("child-capped", { id: "child-capped", type: "capped", status: "completed", result: "done", parentAgentId: "parent-1" });
+    records.set("child-scout", { id: "child-scout", type: "scout", status: "completed", result: "done", parentAgentId: "parent-1" });
+    vi.mocked(manager.resume).mockResolvedValue({ id: "child-capped", status: "completed" } as any);
+    const [agent] = tools();
+
+    // Frontmatter is authoritative for the resumed agent's own type, as on the
+    // spawn path — the call's max_turns cannot raise its ceiling.
+    await execute(agent, { resume: "child-capped", description: "resume capped", prompt: "Keep going", max_turns: 9 });
+    expect(manager.resume).toHaveBeenCalledWith("child-capped", "Keep going", undefined, { maxTurns: 3 });
+
+    // No frontmatter limit: the call's value is what the manager resolves from,
+    // and an omitted one leaves the saved ceiling in charge.
+    await execute(agent, { resume: "child-scout", description: "resume scout", prompt: "Continue", max_turns: 9 });
+    expect(manager.resume).toHaveBeenCalledWith("child-scout", "Continue", undefined, { maxTurns: 9 });
+    await execute(agent, { resume: "child-scout", description: "resume scout", prompt: "Again" });
+    expect(manager.resume).toHaveBeenCalledWith("child-scout", "Again", undefined, { maxTurns: undefined });
+  });
+
   it("reports a background child that fails to start as a tool error", async () => {
     // Under isolation: "worktree" the child is not running when spawn() returns
     // — the repo copy is awaited. The failure must reach the parent as an error

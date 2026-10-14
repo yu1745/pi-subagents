@@ -1681,6 +1681,86 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
     expect(record.result).toBe(""); // no stale prior answer
   });
 
+  it("resume(): a caller abort during an inline resume cancels the prompt and stops the record", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    let runSignal: AbortSignal | undefined;
+    vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
+      runSignal = opts.signal;
+      // A rejected prompt, as pi does when its signal aborts.
+      return await new Promise((_resolve, reject) => {
+        opts.signal.addEventListener("abort", () => reject(new Error("Operation aborted")), { once: true });
+      });
+    });
+
+    const caller = new AbortController();
+    const pending = manager.resume(id, "more", caller.signal);
+    caller.abort();
+    await pending;
+
+    expect(runSignal?.aborted).toBe(true);
+    expect(record.status).toBe("stopped");
+    expect(record.error).toBeUndefined();
+  });
+
+  it("resume(): a stop that lands first survives the runner's rejection", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(resumeMock).mockImplementation(async () => {
+      await gate;
+      // A stop mid-prompt rejects the resumed run rather than returning.
+      throw new Error("Agent is already processing");
+    });
+
+    const pending = manager.resume(id, "more");
+    manager.abort(id);
+    const stoppedAt = record.completedAt;
+    expect(record.status).toBe("stopped");
+    release();
+    await pending;
+
+    expect(record.status).toBe("stopped");
+    expect(record.error).toBeUndefined();
+    expect(record.completedAt).toBe(stoppedAt);
+  });
+
+  it("resume(): an already-aborted caller signal stops before the prompt runs", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    const prompts: string[] = [];
+    vi.mocked(resumeMock).mockImplementation(async (_session, prompt, opts: any) => {
+      prompts.push(prompt);
+      // resumeAgent's own first line: an aborted signal never reaches pi.
+      opts.signal?.throwIfAborted();
+      return { text: "unreachable" };
+    });
+
+    const caller = new AbortController();
+    caller.abort();
+    await manager.resume(id, "more", caller.signal);
+
+    expect(prompts).toEqual(["more"]);
+    expect(record.status).toBe("stopped");
+    expect(record.result).toBeUndefined();
+  });
+
   it("resume(): partial text produced before the failure is kept as result", async () => {
     manager = new AgentManager();
     resolvedRun();

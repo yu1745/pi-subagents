@@ -1586,7 +1586,11 @@ function createNestedSubagentTools(context) {
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
-        const resumed = await context.manager.resume(params.resume, params.prompt, signal);
+        const resumed = await context.manager.resume(params.resume, params.prompt, signal, {
+          // Frontmatter authoritative, as on the spawn path; the manager falls
+          // back to the limit the child was spawned with, then the default.
+          maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns
+        });
         return resumed ? textResult(formatRecord(resumed, "inline"), resumed.status === "error") : textResult(`Failed to resume nested agent "${params.resume}".`, true);
       }
       if (context.depth >= context.maxSubagentDepth) {
@@ -5047,12 +5051,20 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
         this.inFlight.add(id);
         const abortController = new AbortController();
         record2.abortController = abortController;
-        const resumeSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
         record2.status = "running";
         record2.startedAt = Date.now();
         record2.completedAt = void 0;
         record2.result = void 0;
         record2.error = void 0;
+        let detachParentSignal;
+        if (signal) {
+          if (signal.aborted) this.abort(id);
+          else {
+            const onParentAbort = /* @__PURE__ */ __name(() => this.abort(id), "onParentAbort");
+            signal.addEventListener("abort", onParentAbort, { once: true });
+            detachParentSignal = /* @__PURE__ */ __name(() => signal.removeEventListener("abort", onParentAbort), "detachParentSignal");
+          }
+        }
         try {
           const { text, failure, aborted, steered } = await resumeAgent(record2.session, prompt, {
             onTurnEnd: options?.onTurnEnd,
@@ -5073,16 +5085,20 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
               this.onCompact?.(record2, info);
               options?.onCompaction?.(info);
             }, "onCompaction"),
-            signal: resumeSignal
+            signal: abortController.signal
           });
           record2.status = abortController.signal.aborted ? "stopped" : aborted ? "aborted" : failure ? "error" : steered ? "steered" : "completed";
           if (failure) record2.error = failure;
           record2.result = text;
           record2.completedAt = Date.now();
         } catch (err) {
-          record2.status = "error";
-          record2.error = err instanceof Error ? err.message : String(err);
-          record2.completedAt = Date.now();
+          if (record2.status !== "stopped") {
+            record2.status = "error";
+            record2.error = err instanceof Error ? err.message : String(err);
+          }
+          record2.completedAt ??= Date.now();
+        } finally {
+          detachParentSignal?.();
         }
         await this.stopOwnedChildrenJobs(id);
         this.inFlight.delete(id);

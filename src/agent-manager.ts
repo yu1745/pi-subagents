@@ -1346,14 +1346,32 @@ export class AgentManager {
     // Foreground resume: run inline and return the settled record.
     this.jobRuntime?.beginRun(id);
     this.inFlight.add(id);
+    // Fresh controller, as on the spawn path: `abort()` fires whatever
+    // `record.abortController` holds, and the controller its spawn used settled
+    // long ago — so a stop from `/agents` must reach THIS run. The caller's
+    // signal is armed rather than folded into the run's with `AbortSignal.any`,
+    // because only `abort()` marks the record "stopped": combined, a parent Esc
+    // cancels the prompt and leaves the outcome reading as a completion.
     const abortController = new AbortController();
     record.abortController = abortController;
-    const resumeSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
     record.status = "running";
     record.startedAt = Date.now();
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
+    // Armed after the record is in its running shape, since `abort()` refuses to
+    // settle anything that is not running, and before the prompt, since a resume
+    // can be issued on a call that was already cancelled: `addEventListener`
+    // never fires on an aborted signal, so that case stops up front.
+    let detachParentSignal: (() => void) | undefined;
+    if (signal) {
+      if (signal.aborted) this.abort(id);
+      else {
+        const onParentAbort = () => this.abort(id);
+        signal.addEventListener("abort", onParentAbort, { once: true });
+        detachParentSignal = () => signal.removeEventListener("abort", onParentAbort);
+      }
+    }
 
     try {
       const { text, failure, aborted, steered } = await resumeAgent(record.session, prompt, {
@@ -1375,7 +1393,7 @@ export class AgentManager {
           this.onCompact?.(record, info);
           options?.onCompaction?.(info);
         },
-        signal: resumeSignal,
+        signal: abortController.signal,
       });
       // Same contract as the spawn path (#144): a failed final turn is an
       // error, not a completion — but the resumed text stays available.
@@ -1384,9 +1402,16 @@ export class AgentManager {
       record.result = text;
       record.completedAt = Date.now();
     } catch (err) {
-      record.status = "error";
-      record.error = err instanceof Error ? err.message : String(err);
-      record.completedAt = Date.now();
+      // A stop that got there first keeps its status and its timestamp: `abort()`
+      // already settled the record, and a runner rejected by that same abort must
+      // not turn a stopped run into an error.
+      if (record.status !== "stopped") {
+        record.status = "error";
+        record.error = err instanceof Error ? err.message : String(err);
+      }
+      record.completedAt ??= Date.now();
+    } finally {
+      detachParentSignal?.();
     }
 
     await this.stopOwnedChildrenJobs(id);

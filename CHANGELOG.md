@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Stopping an inline resume now reads as a stop, and a rejection afterwards no longer overwrites it.** The foreground resume folded the caller's abort signal into the run's instead of arming it, so a parent interrupt or `/agents` stop cancelled the prompt while the record kept a completion's status and never took `abort()`'s timestamp; the runner's rejection path then wrote `error` over a record `abort()` had already settled as `stopped`. The resume now arms the caller's signal like the spawn path does, stops up front on an already-cancelled call, keeps `stopped` when the runner rejects, and fills in `completedAt` only when unset.
+- **A nested resume honours the resumed agent file's `max_turns`.** The nested `Agent` call passed no turn limit, so the ceiling the child happened to be spawned with shadowed the frontmatter. It now forwards the file's `max_turns`, then the call's, and leaves the limit the agent was spawned with as the last fallback.
+
 ## [0.20.0] - 2026-10-14
 
 > **Native viewer patch: strongly coupled to exactly Pi 1.2.0.** It monkey-patches private runtime internals, not a stable public API or cross-version adapter. Unavailable native viewing falls back to the existing legacy overlay; other Pi versions may use it only if the plugin otherwise loads and works, with no all-version guarantee. First enabling the process-local native patch in an existing session requires a full Pi restart; `/reload` alone may retain the old UI context and use the fallback. No core fork, source build, on-disk patch or global Pi changes are required.
