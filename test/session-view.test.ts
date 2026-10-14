@@ -6,9 +6,9 @@ import { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import { openAgentSessionView, type SessionViewUI } from "../src/ui/session-view.js";
 import { flushViews, nativeViewer } from "./helpers/session-view.js";
 
-vi.mock("../src/ui/native-pi-1.1.0/index.js", () => ({
-  SUPPORTED_PI_VERSION: "1.1.0",
-  getNativeSessionViewUnavailableReason: () => "Readonly viewing requires the Pi 1.1.0 runtime patch; reload or restart Pi.",
+vi.mock("../src/ui/native-pi-1.2.0/index.js", () => ({
+  SUPPORTED_PI_VERSION: "1.2.0",
+  getNativeSessionViewUnavailableReason: () => "Readonly viewing requires the Pi 1.2.0 runtime patch; reload or restart Pi.",
 }));
 
 vi.mock("../src/agent-runner.js", () => ({
@@ -246,7 +246,7 @@ describe("native session view leases", () => {
     const acquireSpy = vi.spyOn(manager, "acquireSessionView");
     const ui = { notify: vi.fn() };
     expect(openAgentSessionView(manager, ui, record)).toBeUndefined();
-    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("Pi 1.1.0 runtime patch"), "warning");
+    expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("Pi 1.2.0 runtime patch"), "warning");
     expect(acquireSpy).not.toHaveBeenCalled();
   });
 

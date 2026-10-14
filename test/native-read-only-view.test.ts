@@ -5,8 +5,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, KeybindingsManager, Text, TUI_KEYBINDINGS, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { createReadOnlySessionView, type ReadOnlySessionViewOptions } from "../src/ui/native-pi-1.1.0/read-only-view.js";
-import { installSessionViewTracking } from "../src/ui/native-pi-1.1.0/session-snapshot.js";
+import { createReadOnlySessionView, type ReadOnlySessionViewOptions } from "../src/ui/native-pi-1.2.0/read-only-view.js";
+import { installSessionViewTracking } from "../src/ui/native-pi-1.2.0/session-snapshot.js";
 import { until } from "./helpers/job-runtime.js";
 
 class FooterData {
@@ -59,7 +59,7 @@ function fixture() {
 
 beforeAll(() => { initTheme("dark"); getMarkdownTheme(); });
 
-describe("native Pi 1.1.0 read-only session view", () => {
+describe("native Pi 1.2.0 read-only session view", () => {
   it("replays using native built-in/custom renderers without touching the parent", () => {
     const f = fixture();
     f.manager.appendMessage({ role: "user", content: "question", timestamp: 1 });

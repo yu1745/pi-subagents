@@ -10,7 +10,7 @@ import type { SessionViewSnapshot } from "./session-snapshot.js";
 type Message = Extract<AgentSessionEvent, { type: "message_start" }>["message"];
 export interface NativeFooterData extends ReadonlyFooterDataProvider { dispose(): void }
 
-/** Deliberately pinned to the presentation fields/methods of InteractiveMode 1.1.0. */
+/** Deliberately pinned to the presentation fields/methods of InteractiveMode 1.2.0. */
 interface Presentation {
   session: AgentSession;
   sessionManager: AgentSession["sessionManager"];
@@ -45,7 +45,7 @@ export interface NativeHost extends Presentation {
 }
 
 export function assertNativeHost(mode: unknown): asserts mode is NativeHost {
-  if (!mode || typeof mode !== "object") throw new Error("Expected Pi 1.1.0 InteractiveMode");
+  if (!mode || typeof mode !== "object") throw new Error("Expected Pi 1.2.0 InteractiveMode");
   const host = mode as NativeHost;
   const methods = ["renderSessionEntries", "renderSessionItems", "addMessageToChat", "addCustomEntryToChat",
     "getRegisteredToolDefinition", "getMarkdownThemeWithSettings", "getMarkdownTransformers", "getUserMessageText",
@@ -58,7 +58,7 @@ export function assertNativeHost(mode: unknown): asserts mode is NativeHost {
     typeof host.footerDataProvider?.constructor !== "function" ||
     typeof host.footerDataProvider?.onBranchChange !== "function" ||
     typeof host.footerDataProvider?.dispose !== "function") {
-    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.1.0 presentation API");
+    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.2.0 presentation API");
   }
 }
 
@@ -100,7 +100,7 @@ export class NativeTranscript {
   }
 
   private indexRenderedTools(): void {
-    // Native replay removes finalized/error tools from pendingTools. Keep their 1.1.0
+    // Native replay removes finalized/error tools from pendingTools. Keep their 1.2.0
     // component IDs as well, so a snapshot's final-event gap cannot render them twice.
     for (const child of this.container.children) {
       if ("toolCallId" in child && typeof child.toolCallId === "string" &&
@@ -110,8 +110,21 @@ export class NativeTranscript {
     }
   }
 
+  /** Pi 1.2's shell renderers keep a 1s invalidate timer in `rendererState` until a final result
+   * renders. These rows are a copy of the child's transcript, so nothing else clears their clock
+   * when this transcript drops them or goes away. */
+  private releaseComponents(): void {
+    for (const child of this.container.children) {
+      const state = (child as { rendererState?: { interval?: ReturnType<typeof setInterval> } }).rendererState;
+      if (!state?.interval) continue;
+      clearInterval(state.interval);
+      state.interval = undefined;
+    }
+  }
+
   replay(snapshot: SessionViewSnapshot): void {
     const r = this.receiver;
+    this.releaseComponents();
     this.container.clear();
     this.tools.clear();
     r.streamingComponent = undefined;
@@ -141,6 +154,7 @@ export class NativeTranscript {
     const branch = r.sessionManager.getBranch();
     const index = branch.findIndex((entry) => entry.id === first.id);
     const after = new Set(branch.slice(index + 1).map((entry) => entry.id));
+    this.releaseComponents();
     this.container.clear();
     this.tools.clear();
     r.renderSessionEntries([
@@ -149,6 +163,12 @@ export class NativeTranscript {
     ]);
     this.indexRenderedTools();
     return entries.map((entry) => entry.id);
+  }
+
+  dispose(): void {
+    this.releaseComponents();
+    this.container.clear();
+    this.tools.clear();
   }
 
   handleEvent(event: AgentSessionEvent): void {

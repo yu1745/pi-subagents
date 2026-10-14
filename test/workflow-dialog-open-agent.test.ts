@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // These synthetic sessions test inspector routing, not Pi's private tracker
 // internals. Explicitly model successful tracking; production guards stay real.
-vi.mock("../src/ui/native-pi-1.1.0/session-snapshot.js", () => ({
+vi.mock("../src/ui/native-pi-1.2.0/session-snapshot.js", () => ({
   installSessionViewTracking: vi.fn(() => true),
 }));
 

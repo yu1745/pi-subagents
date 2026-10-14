@@ -1,6 +1,9 @@
-import { type Component, Container, getCapabilities, Image, ScrollView, setCapabilities, setCellDimensions, type Terminal, Text, TuiAltScreen, TuiMainScreen, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { type Component, Container, CURSOR_MARKER, getCapabilities, Image, renderFakeCursor, ScrollView, setCapabilities, setCellDimensions, type Terminal, Text, TuiAltScreen, TuiMainScreen, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { installModalHost110 as installModalHost } from "../src/ui/native-pi-1.1.0/modal-host.js";
+import { installModalHost120 as installModalHost } from "../src/ui/native-pi-1.2.0/modal-host.js";
+
+/** Pi 1.2 emits the drawn cursor as zero-width APC markers that only TUI resolution may paint. */
+const FAKE_CURSOR_START = "\u001b_pi:fc\u0007";
 
 class FakeTerminal implements Terminal {
 	columns = 40;
@@ -106,6 +109,25 @@ it("regular mode freezes history and appends background output once, without cle
 	} finally { host.dispose(); tui.stop(); }
 });
 for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
+	it(`${Renderer.name} resolves fake cursors in modal frames and parent restoration`, () => {
+		const terminal = new FakeTerminal(); const tui = new Renderer(terminal);
+		const editor = new Recorder(); editor.lines = [`${CURSOR_MARKER}${renderFakeCursor("editor")}`];
+		tui.addChild(editor); tui.setFocus(editor); tui.start(); tui.renderNow();
+		const host = installModalHost(tui);
+		try {
+			const modal = new Recorder(); modal.lines = [`${CURSOR_MARKER}${renderFakeCursor("modal")}`];
+			const scope = host.show(modal);
+			terminal.writes = []; tui.renderNow();
+			const painted = terminal.writes.join("");
+			const showHardwareCursor = tui.getShowHardwareCursor();
+			expect(painted).not.toContain(FAKE_CURSOR_START);
+			expect(painted).toContain(showHardwareCursor ? "modal" : "\u001b[7mmodal\u001b[27m");
+			scope.close(); terminal.writes = []; tui.renderNow();
+			const restored = terminal.writes.join("");
+			expect(restored).not.toContain(FAKE_CURSOR_START);
+			expect(restored).toContain(showHardwareCursor ? "editor" : "\u001b[7meditor\u001b[27m");
+		} finally { host.dispose(); tui.stop(); }
+	});
 	it(`${Renderer.name} closes the owner exactly once on direct stop, including reentrant cleanup`, () => {
 		const tui = new Renderer(new FakeTerminal()); tui.start();
 		const host = installModalHost(tui); let calls = 0;

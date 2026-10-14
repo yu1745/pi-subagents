@@ -2876,7 +2876,7 @@ var init_mention = __esm({
   }
 });
 
-// src/ui/native-pi-1.1.0/modal-host.ts
+// src/ui/native-pi-1.2.0/modal-host.ts
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import {
   getCapabilities,
@@ -2887,19 +2887,19 @@ import {
   TuiAltScreen,
   TuiMainScreen
 } from "@earendil-works/pi-tui";
-function installModalHost110(tui) {
+function installModalHost120(tui) {
   const fullscreen = tui.mode === "fullscreen";
   const prototype = fullscreen ? TuiAltScreen.prototype : TuiMainScreen.prototype;
   const n = tui;
   const hooks = ["doRender", "resetRenderState", "handleTerminalInput", "setFocusInternal", "getFocusedComponent", "hasOverlay", "invalidate", "stop", "showOverlay", "consumeTerminalColorResponse", "consumeTerminalColorSchemeReport", "consumeCellSizeResponse", "isComponentMounted", "isOverlayVisible", "getTopmostVisibleOverlay", "clearOverlayFocusRestore", "hideTerminalCursor", "requestImmediateRender", "extractCursorPosition", "applyLineResets", ...fullscreen ? ["refreshSearch", ...layers, "clearTextSelection", "stopScrollbarHover", "stopScrollbarDrag", "clearComponentMouseGesture"] : ["collectKittyImageIds", "deleteKittyImages", "positionHardwareCursor", "compositeOverlays"]];
-  if (VERSION !== "1.1.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.1.0 TUI");
+  if (VERSION !== "1.2.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.2.0 TUI");
   for (const key of hooks) {
     const own = Object.getOwnPropertyDescriptor(tui, key);
-    if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.1.0 hook: ${key}`);
+    if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.2.0 hook: ${key}`);
     const expected = Reflect.get(prototype, key);
-    if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.1.0 hook: ${key}`);
+    if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.2.0 hook: ${key}`);
   }
-  if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.1.0 renderer state");
+  if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.2.0 renderer state");
   const restores = [];
   function patch(key, value) {
     const descriptor = Object.getOwnPropertyDescriptor(n, key);
@@ -3027,7 +3027,7 @@ function installModalHost110(tui) {
     } finally {
       setCapabilities(capabilities);
     }
-    const lines = [...helper.currentLayout?.lines ?? []];
+    const lines = n.resolveFakeCursors([...helper.currentLayout?.lines ?? []]);
     const cursor = n.extractCursorPosition(lines, tui.terminal.rows);
     restoreViewport = true;
     paint(n.applyLineResets(lines), /* @__PURE__ */ new Set([...n.previousKittyImageIds, ...modalImages]));
@@ -3041,7 +3041,7 @@ function installModalHost110(tui) {
   function restoreParent() {
     if (!restoreViewport) return;
     const { columns: width, rows: height } = tui.terminal;
-    let lines = n.render(width);
+    let lines = n.resolveFakeCursors(n.render(width));
     if (n.hasOverlayEntries) lines = n.compositeOverlays(lines, width, height);
     const cursor = n.extractCursorPosition(lines, height);
     lines = n.applyLineResets(lines);
@@ -3256,12 +3256,12 @@ function installModalHost110(tui) {
 }
 var installed, imageLine, layers;
 var init_modal_host = __esm({
-  "src/ui/native-pi-1.1.0/modal-host.ts"() {
+  "src/ui/native-pi-1.2.0/modal-host.ts"() {
     "use strict";
     installed = /* @__PURE__ */ new WeakSet();
     imageLine = /* @__PURE__ */ __name((line) => line.includes("\x1B_G") || line.includes("\x1B]1337;File="), "imageLine");
     layers = ["applySearchHighlights", "compositeScrollToEndIndicator", "compositeOverlays", "applySelection", "compositeFlashes"];
-    __name(installModalHost110, "installModalHost110");
+    __name(installModalHost120, "installModalHost120");
   }
 });
 
@@ -3468,14 +3468,14 @@ var init_force_steer_composer = __esm({
   }
 });
 
-// src/ui/native-pi-1.1.0/native-transcript.ts
+// src/ui/native-pi-1.2.0/native-transcript.ts
 import {
   AssistantMessageComponent,
   ToolExecutionComponent
 } from "@earendil-works/pi-coding-agent";
 import { Container } from "@earendil-works/pi-tui";
 function assertNativeHost(mode) {
-  if (!mode || typeof mode !== "object") throw new Error("Expected Pi 1.1.0 InteractiveMode");
+  if (!mode || typeof mode !== "object") throw new Error("Expected Pi 1.2.0 InteractiveMode");
   const host = mode;
   const methods = [
     "renderSessionEntries",
@@ -3494,12 +3494,12 @@ function assertNativeHost(mode) {
   ];
   const prototype = Object.getPrototypeOf(host);
   if (!prototype || methods.some((key) => typeof prototype[key] !== "function") || typeof host.ui?.requestRender !== "function" || typeof host.keybindings?.matches !== "function" || typeof host.mermaidMarkdownTransformer !== "function" || typeof host.footerDataProvider?.constructor !== "function" || typeof host.footerDataProvider?.onBranchChange !== "function" || typeof host.footerDataProvider?.dispose !== "function") {
-    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.1.0 presentation API");
+    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.2.0 presentation API");
   }
 }
 var NativeTranscript;
 var init_native_transcript = __esm({
-  "src/ui/native-pi-1.1.0/native-transcript.ts"() {
+  "src/ui/native-pi-1.2.0/native-transcript.ts"() {
     "use strict";
     __name(assertNativeHost, "assertNativeHost");
     NativeTranscript = class {
@@ -3554,8 +3554,20 @@ var init_native_transcript = __esm({
           }
         }
       }
+      /** Pi 1.2's shell renderers keep a 1s invalidate timer in `rendererState` until a final result
+       * renders. These rows are a copy of the child's transcript, so nothing else clears their clock
+       * when this transcript drops them or goes away. */
+      releaseComponents() {
+        for (const child of this.container.children) {
+          const state = child.rendererState;
+          if (!state?.interval) continue;
+          clearInterval(state.interval);
+          state.interval = void 0;
+        }
+      }
       replay(snapshot) {
         const r = this.receiver;
+        this.releaseComponents();
         this.container.clear();
         this.tools.clear();
         r.streamingComponent = void 0;
@@ -3590,6 +3602,7 @@ var init_native_transcript = __esm({
         const branch = r.sessionManager.getBranch();
         const index = branch.findIndex((entry) => entry.id === first.id);
         const after = new Set(branch.slice(index + 1).map((entry) => entry.id));
+        this.releaseComponents();
         this.container.clear();
         this.tools.clear();
         r.renderSessionEntries([
@@ -3599,6 +3612,11 @@ var init_native_transcript = __esm({
         ]);
         this.indexRenderedTools();
         return entries.map((entry) => entry.id);
+      }
+      dispose() {
+        this.releaseComponents();
+        this.container.clear();
+        this.tools.clear();
       }
       handleEvent(event) {
         const r = this.receiver;
@@ -3696,7 +3714,7 @@ var init_native_transcript = __esm({
   }
 });
 
-// src/ui/native-pi-1.1.0/session-snapshot.ts
+// src/ui/native-pi-1.2.0/session-snapshot.ts
 function getState(session) {
   const descriptor = Object.getOwnPropertyDescriptor(session, stateKey);
   if (!descriptor || !("value" in descriptor) || descriptor.enumerable) return void 0;
@@ -3795,7 +3813,7 @@ function subscribeSessionView(session, listener) {
   let state = getState(session);
   if (!state) {
     if (!installSessionViewTracking(session)) {
-      throw new Error("Session view requires an idle, supported Pi 1.1.0 session tracked before running");
+      throw new Error("Session view requires an idle, supported Pi 1.2.0 session tracked before running");
     }
     state = getState(session);
   }
@@ -3817,10 +3835,10 @@ function subscribeSessionView(session, listener) {
 }
 var stateKey, stateSchema, ViewState;
 var init_session_snapshot = __esm({
-  "src/ui/native-pi-1.1.0/session-snapshot.ts"() {
+  "src/ui/native-pi-1.2.0/session-snapshot.ts"() {
     "use strict";
-    stateKey = /* @__PURE__ */ Symbol.for("pi-subagents.session-view-tracking.pi-1.1.0");
-    stateSchema = "pi-subagents.session-view-tracking.pi-1.1.0/v1";
+    stateKey = /* @__PURE__ */ Symbol.for("pi-subagents.session-view-tracking.pi-1.2.0");
+    stateSchema = "pi-subagents.session-view-tracking.pi-1.2.0/v1";
     __name(getState, "getState");
     __name(copyArguments, "copyArguments");
     __name(copyResult, "copyResult");
@@ -3835,7 +3853,7 @@ var init_session_snapshot = __esm({
       pending = /* @__PURE__ */ new Set();
       tools = /* @__PURE__ */ new Map();
       listeners = /* @__PURE__ */ new Set();
-      // v1.1.0 appends custom entries before emitting, without associating appMessage.
+      // v1.2.0 appends custom entries before emitting, without associating appMessage.
       custom = /* @__PURE__ */ new Set();
       clear() {
         this.streamingMessage = void 0;
@@ -3889,7 +3907,7 @@ var init_session_snapshot = __esm({
   }
 });
 
-// src/ui/native-pi-1.1.0/read-only-view.ts
+// src/ui/native-pi-1.2.0/read-only-view.ts
 import {
   FooterComponent,
   sessionEntryToContextMessages
@@ -3900,7 +3918,7 @@ function createReadOnlySessionView(mode, session, theme, back, options) {
 }
 var ReadOnlySessionView;
 var init_read_only_view = __esm({
-  "src/ui/native-pi-1.1.0/read-only-view.ts"() {
+  "src/ui/native-pi-1.2.0/read-only-view.ts"() {
     "use strict";
     init_force_steer_composer();
     init_native_transcript();
@@ -4057,6 +4075,7 @@ var init_read_only_view = __esm({
         this.unsubscribeBranch?.();
         this.unsubscribeBranch = void 0;
         this.scrollView.setScrollbar("hidden");
+        this.transcript.dispose();
         this.footer.dispose();
         this.footerData.dispose();
       }
@@ -4065,7 +4084,7 @@ var init_read_only_view = __esm({
   }
 });
 
-// src/ui/native-pi-1.1.0/index.ts
+// src/ui/native-pi-1.2.0/index.ts
 import { InteractiveMode, VERSION as VERSION2 } from "@earendil-works/pi-coding-agent";
 function getNativeSessionViewUnavailableReason() {
   try {
@@ -4105,7 +4124,7 @@ function openView(state, mode, session, theme, options) {
     const close = /* @__PURE__ */ __name(() => finish(), "close");
     state.views.set(mode, close);
     try {
-      host = installModalHost110(mode.renderer);
+      host = installModalHost120(mode.renderer);
       view = createReadOnlySessionView(mode, session, theme, close, options);
       if (closed) {
         view.dispose();
@@ -4217,13 +4236,13 @@ function installNativeSessionViewPatch() {
   }
 }
 var SUPPORTED_PI_VERSION, REGISTRY, HOOKS, unavailableReason;
-var init_native_pi_1_1 = __esm({
-  "src/ui/native-pi-1.1.0/index.ts"() {
+var init_native_pi_1_2 = __esm({
+  "src/ui/native-pi-1.2.0/index.ts"() {
     "use strict";
     init_modal_host();
     init_read_only_view();
-    SUPPORTED_PI_VERSION = "1.1.0";
-    REGISTRY = /* @__PURE__ */ Symbol.for("pi-subagents.native-session-view.pi-1.1.0");
+    SUPPORTED_PI_VERSION = "1.2.0";
+    REGISTRY = /* @__PURE__ */ Symbol.for("pi-subagents.native-session-view.pi-1.2.0");
     HOOKS = ["createExtensionUIContext", "resetExtensionUI", "shutdown", "stop", "switchTuiMode"];
     __name(getNativeSessionViewUnavailableReason, "getNativeSessionViewUnavailableReason");
     __name(openView, "openView");
@@ -4286,7 +4305,7 @@ var init_agent_manager = __esm({
     init_mention();
     init_model_resolver();
     init_resume_store();
-    init_native_pi_1_1();
+    init_native_pi_1_2();
     init_session_snapshot();
     init_usage();
     init_worktree();
@@ -5326,7 +5345,7 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
         return {
           session,
           signal: controller.signal,
-          unavailableReason: this.untrackedSessions.has(session) ? "Readonly child viewing is unavailable: the Pi 1.1.0 session tracker could not attach before execution. Reload or restart Pi and create a new child session." : void 0,
+          unavailableReason: this.untrackedSessions.has(session) ? "Readonly child viewing is unavailable: the Pi 1.2.0 session tracker could not attach before execution. Reload or restart Pi and create a new child session." : void 0,
           close: /* @__PURE__ */ __name(() => controller.abort(), "close"),
           release: /* @__PURE__ */ __name(() => {
             if (!retention.viewers.delete(viewer)) return;
@@ -11688,7 +11707,7 @@ init_user_steer();
 init_agent_widget();
 init_conversation_viewer();
 init_force_steer_composer();
-init_native_pi_1_1();
+init_native_pi_1_2();
 import { matchesKey as matchesKey6, Text as Text4 } from "@earendil-works/pi-tui";
 function openAgentSessionView(manager, ui, record2, legacy = {}) {
   const viewSession = ui.viewSession;
@@ -12425,7 +12444,7 @@ var FleetList = class {
 };
 
 // src/index.ts
-init_native_pi_1_1();
+init_native_pi_1_2();
 
 // src/ui/select-item.ts
 async function selectItem(ui, title, items, format) {

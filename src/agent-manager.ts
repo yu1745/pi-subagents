@@ -28,8 +28,8 @@ import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import { ResumeStore, validateResumeSession } from "./resume-store.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
-import { SUPPORTED_PI_VERSION } from "./ui/native-pi-1.1.0/index.js";
-import { installSessionViewTracking } from "./ui/native-pi-1.1.0/session-snapshot.js";
+import { SUPPORTED_PI_VERSION } from "./ui/native-pi-1.2.0/index.js";
+import { installSessionViewTracking } from "./ui/native-pi-1.2.0/session-snapshot.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -1696,7 +1696,7 @@ export class AgentManager {
       session,
       signal: controller.signal,
       unavailableReason: this.untrackedSessions.has(session)
-        ? "Readonly child viewing is unavailable: the Pi 1.1.0 session tracker could not attach before execution. Reload or restart Pi and create a new child session."
+        ? "Readonly child viewing is unavailable: the Pi 1.2.0 session tracker could not attach before execution. Reload or restart Pi and create a new child session."
         : undefined,
       close: () => controller.abort(),
       release: () => {

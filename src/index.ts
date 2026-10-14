@@ -59,7 +59,7 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
-import { installNativeSessionViewPatch } from "./ui/native-pi-1.1.0/index.js";
+import { installNativeSessionViewPatch } from "./ui/native-pi-1.2.0/index.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
 import { openAgentSessionView } from "./ui/session-view.js";

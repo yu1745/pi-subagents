@@ -7,7 +7,7 @@ import {
   SessionManager, SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { installSessionViewTracking, subscribeSessionView } from "../src/ui/native-pi-1.1.0/session-snapshot.js";
+import { installSessionViewTracking, subscribeSessionView } from "../src/ui/native-pi-1.2.0/session-snapshot.js";
 import { fauxModelBackend } from "./helpers/faux-model-backend.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 
@@ -39,7 +39,7 @@ function fake() {
 }
 const user: AgentMessage = { role: "user", content: "hello", timestamp: 1 };
 
-describe("Pi 1.1.0 session view runtime tracking", () => {
+describe("Pi 1.2.0 session view runtime tracking", () => {
   it("publishes before observers and covers persistence gaps with atomic subscriptions", async () => {
     const { raw, session, snapshot, publicListener } = fake();
     expect(installSessionViewTracking(session)).toBe(true);
@@ -102,7 +102,7 @@ describe("Pi 1.1.0 session view runtime tracking", () => {
     const second = await vi.importActual<{
       installSessionViewTracking: typeof installSessionViewTracking;
       subscribeSessionView: typeof subscribeSessionView;
-    }>("../src/ui/native-pi-1.1.0/session-snapshot.js");
+    }>("../src/ui/native-pi-1.2.0/session-snapshot.js");
     expect(second.installSessionViewTracking).not.toBe(installSessionViewTracking);
     expect(second.installSessionViewTracking(session)).toBe(true);
     expect([raw._emit, raw._appendCustomMessage, raw.dispose]).toEqual(wrappers);
@@ -111,7 +111,7 @@ describe("Pi 1.1.0 session view runtime tracking", () => {
     expect(view.snapshot).toEqual(snapshot());
     expect(view.snapshot).toMatchObject({ revision: 3, pendingMessages: [user], streamingMessage: message });
     expect(view.snapshot.tools).toHaveLength(1);
-    const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.1.0");
+    const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.2.0");
     expect(Object.getOwnPropertyDescriptor(session, key)?.enumerable).toBe(false);
 
     raw._emit({ type: "message_end", message: user });
@@ -140,13 +140,13 @@ describe("Pi 1.1.0 session view runtime tracking", () => {
   });
 
   it("rejects incompatible shared state without replacing it or wrapping methods", () => {
-    for (const value of [{ schema: "unknown" }, { schema: "pi-subagents.session-view-tracking.pi-1.1.0/v1", revision: 0, disposed: false }]) {
+    for (const value of [{ schema: "unknown" }, { schema: "pi-subagents.session-view-tracking.pi-1.2.0/v1", revision: 0, disposed: false }]) {
       const { raw, session } = fake();
-      const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.1.0");
+      const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.2.0");
       Object.defineProperty(session, key, { value });
       const emit = raw._emit;
       expect(installSessionViewTracking(session)).toBe(false);
-      expect(() => subscribeSessionView(session, () => {})).toThrow("supported Pi 1.1.0");
+      expect(() => subscribeSessionView(session, () => {})).toThrow("supported Pi 1.2.0");
       expect(raw._emit).toBe(emit);
       expect(Object.getOwnPropertyDescriptor(session, key)?.value).toBe(value);
     }

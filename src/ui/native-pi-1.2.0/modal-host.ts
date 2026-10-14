@@ -7,7 +7,7 @@ import {
 interface Overlay { component: Component; preFocus: Component | null; bounds?: unknown }
 interface FocusRestore { status: string; overlay?: Overlay }
 type Cursor = { row: number; col: number } | null;
-/** Deliberately version-specific structural view of the 1.1.0 private runtime. */
+/** Deliberately version-specific structural view of the 1.2.0 private runtime. */
 interface Native extends TUI {
 	getFocusedComponent(): Component | null;
 	stopped: boolean;
@@ -58,6 +58,7 @@ interface Native extends TUI {
 	compositeFlashes(lines: string[], ...args: unknown[]): string[];
 	extractCursorPosition(lines: string[], height: number): Cursor;
 	applyLineResets(lines: string[]): string[];
+	resolveFakeCursors(lines: string[]): string[];
 	collectKittyImageIds(lines: string[]): Set<number>;
 	deleteKittyImages(ids: Iterable<number>): string;
 	positionHardwareCursor(cursor: Cursor, length: number): void;
@@ -69,21 +70,21 @@ const installed = new WeakSet<TUI>();
 const imageLine = (line: string): boolean => line.includes("\x1b_G") || line.includes("\x1b]1337;File=");
 const layers = ["applySearchHighlights", "compositeScrollToEndIndicator", "compositeOverlays", "applySelection", "compositeFlashes"] as const;
 
-/** Install only on the exact bundled Pi 1.1.0 runtime; never modify a prototype. */
-export function installModalHost110(tui: TUI): { show(component: Component, onClose?: () => void): { close(): void }; dispose(): void } {
+/** Install only on the exact bundled Pi 1.2.0 runtime; never modify a prototype. */
+export function installModalHost120(tui: TUI): { show(component: Component, onClose?: () => void): { close(): void }; dispose(): void } {
 	// Read the host's virtual-module version, not metadata from another on-disk SDK copy.
 	const fullscreen = tui.mode === "fullscreen";
 	const prototype = fullscreen ? TuiAltScreen.prototype : TuiMainScreen.prototype;
 	const n = tui as Native;
 	const hooks = ["doRender", "resetRenderState", "handleTerminalInput", "setFocusInternal", "getFocusedComponent", "hasOverlay", "invalidate", "stop", "showOverlay", "consumeTerminalColorResponse", "consumeTerminalColorSchemeReport", "consumeCellSizeResponse", "isComponentMounted", "isOverlayVisible", "getTopmostVisibleOverlay", "clearOverlayFocusRestore", "hideTerminalCursor", "requestImmediateRender", "extractCursorPosition", "applyLineResets", ...(fullscreen ? ["refreshSearch", ...layers, "clearTextSelection", "stopScrollbarHover", "stopScrollbarDrag", "clearComponentMouseGesture"] : ["collectKittyImageIds", "deleteKittyImages", "positionHardwareCursor", "compositeOverlays"])] as const;
-	if (VERSION !== "1.1.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.1.0 TUI");
+	if (VERSION !== "1.2.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.2.0 TUI");
 	for (const key of hooks) {
 		const own = Object.getOwnPropertyDescriptor(tui, key);
-		if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.1.0 hook: ${key}`);
+		if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.2.0 hook: ${key}`);
 		const expected = Reflect.get(prototype, key);
-		if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.1.0 hook: ${key}`);
+		if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.2.0 hook: ${key}`);
 	}
-	if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.1.0 renderer state");
+	if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.2.0 renderer state");
 
 	const restores: Array<() => void> = [];
 	function patch<K extends keyof Native>(key: K, value: Native[K]): void {
@@ -145,7 +146,7 @@ export function installModalHost110(tui: TUI): { show(component: Component, onCl
 		// Clear every target row before any image placement (WezTerm's EL erases images).
 		for (let row = 0; row < height; row++) output += `\x1b[${row + 1};1H\x1b[2K`;
 		// WezTerm also erases image cells on later text writes. Place images only
-		// after all text, matching Pi 1.1.0's fullscreen redraw ordering.
+		// after all text, matching Pi 1.2.0's fullscreen redraw ordering.
 		for (let row = 0; row < height; row++) {
 			const line = lines[row] ?? "";
 			if (!imageLine(line)) output += `\x1b[${row + 1};1H${sliceByColumn(line, 0, width, true)}`;
@@ -194,7 +195,8 @@ export function installModalHost110(tui: TUI): { show(component: Component, onCl
 			if (capabilities.images === "iterm2") setCapabilities({ ...capabilities, images: null });
 			helper.doRender();
 		} finally { setCapabilities(capabilities); }
-		const lines = [...(helper.currentLayout?.lines ?? [])];
+		// Pi 1.2 resolves fake cursors before compositing; the helper's layout keeps the raw markers.
+		const lines = n.resolveFakeCursors([...(helper.currentLayout?.lines ?? [])]);
 		const cursor = n.extractCursorPosition(lines, tui.terminal.rows);
 		restoreViewport = true;
 		paint(n.applyLineResets(lines), new Set([...n.previousKittyImageIds, ...modalImages]));
@@ -208,7 +210,8 @@ export function installModalHost110(tui: TUI): { show(component: Component, onCl
 	function restoreParent(): void {
 		if (!restoreViewport) return;
 		const { columns: width, rows: height } = tui.terminal;
-		let lines = n.render(width);
+		// Match 1.2.0's render order: fake cursors resolve to SGR before overlays and line slicing.
+		let lines = n.resolveFakeCursors(n.render(width));
 		if (n.hasOverlayEntries) lines = n.compositeOverlays(lines, width, height);
 		const cursor = n.extractCursorPosition(lines, height);
 		lines = n.applyLineResets(lines);
