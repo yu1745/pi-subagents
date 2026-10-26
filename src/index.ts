@@ -898,6 +898,9 @@ export default function (pi: ExtensionAPI) {
     // extension factory has run, so this is the earliest point the real value
     // exists. Detached inside — a workflow must not hold up session startup.
     resolveWorkflowCollisions(ctx);
+    // Keep model-facing subagent tools opt-in for each session.
+    subagentToolsEnabled = false;
+    setSubagentToolsActive(false);
     runWorkflowFlag(ctx);
   });
 
@@ -4219,6 +4222,41 @@ Write the file using the write tool. Only write the file, nothing else.`;
     );
     ctx.ui.notify(message, level);
   }
+
+  const manualSubagentTools = [
+    SUBAGENT_TOOL_NAMES.AGENT,
+    SUBAGENT_TOOL_NAMES.WORKFLOW,
+    SUBAGENT_TOOL_NAMES.GET_RESULT,
+    "get_subagent_activity",
+    "get_subagent_activity_detail",
+    "watch_subagent",
+    SUBAGENT_TOOL_NAMES.STEER,
+    "bash_bg",
+    "jobs",
+    "monitor",
+    "agent_bg",
+  ];
+  let subagentToolsEnabled = false;
+  function setSubagentToolsActive(enabled: boolean): void {
+    const available = new Set(pi.getAllTools().map(tool => tool.name));
+    const names = manualSubagentTools.filter(name => available.has(name) && (name !== SUBAGENT_TOOL_NAMES.WORKFLOW || isWorkflowsEnabled()));
+    const active = pi.getActiveTools().filter(name => !names.includes(name));
+    pi.setActiveTools(enabled ? [...active, ...names] : active);
+  }
+
+  pi.registerCommand("subagent-tools", {
+    description: "Enable or disable subagent model tools for this session: /subagent-tools on|off",
+    handler: async (args, ctx) => {
+      const action = args.trim().toLowerCase();
+      if (action !== "on" && action !== "off") {
+        ctx.ui.notify(`Subagent tools: ${subagentToolsEnabled ? "on" : "off"}. Use /subagent-tools on|off`, "info");
+        return;
+      }
+      subagentToolsEnabled = action === "on";
+      setSubagentToolsActive(subagentToolsEnabled);
+      ctx.ui.notify(`Subagent tools ${action} for this session`, "info");
+    },
+  });
 
   pi.registerCommand("agents", {
     description: "Manage agents",

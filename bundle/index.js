@@ -16622,6 +16622,8 @@ Use get_subagent_result for full output.`,
       );
     }
     resolveWorkflowCollisions(ctx);
+    subagentToolsEnabled = false;
+    setSubagentToolsActive(false);
     runWorkflowFlag(ctx);
   });
   const mentionTypes = /* @__PURE__ */ __name(() => getAvailableTypes().map((name) => ({ name, description: getAgentConfig(name)?.description ?? name })), "mentionTypes");
@@ -19144,6 +19146,40 @@ Write the file using the write tool. Only write the file, nothing else.`;
     ctx.ui.notify(message, level);
   }
   __name(notifyApplied, "notifyApplied");
+  const manualSubagentTools = [
+    SUBAGENT_TOOL_NAMES.AGENT,
+    SUBAGENT_TOOL_NAMES.WORKFLOW,
+    SUBAGENT_TOOL_NAMES.GET_RESULT,
+    "get_subagent_activity",
+    "get_subagent_activity_detail",
+    "watch_subagent",
+    SUBAGENT_TOOL_NAMES.STEER,
+    "bash_bg",
+    "jobs",
+    "monitor",
+    "agent_bg"
+  ];
+  let subagentToolsEnabled = false;
+  function setSubagentToolsActive(enabled) {
+    const available = new Set(pi.getAllTools().map((tool) => tool.name));
+    const names = manualSubagentTools.filter((name) => available.has(name) && (name !== SUBAGENT_TOOL_NAMES.WORKFLOW || isWorkflowsEnabled()));
+    const active2 = pi.getActiveTools().filter((name) => !names.includes(name));
+    pi.setActiveTools(enabled ? [...active2, ...names] : active2);
+  }
+  __name(setSubagentToolsActive, "setSubagentToolsActive");
+  pi.registerCommand("subagent-tools", {
+    description: "Enable or disable subagent model tools for this session: /subagent-tools on|off",
+    handler: /* @__PURE__ */ __name(async (args, ctx) => {
+      const action = args.trim().toLowerCase();
+      if (action !== "on" && action !== "off") {
+        ctx.ui.notify(`Subagent tools: ${subagentToolsEnabled ? "on" : "off"}. Use /subagent-tools on|off`, "info");
+        return;
+      }
+      subagentToolsEnabled = action === "on";
+      setSubagentToolsActive(subagentToolsEnabled);
+      ctx.ui.notify(`Subagent tools ${action} for this session`, "info");
+    }, "handler")
+  });
   pi.registerCommand("agents", {
     description: "Manage agents",
     handler: /* @__PURE__ */ __name(async (_args, ctx) => {
