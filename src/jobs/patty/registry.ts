@@ -68,7 +68,7 @@ export function errPathFor(jobId: string): string {
 /**
  * Build a fresh running Job. Centralizes the Job shape so the new `kind`/`stop`
  * fields (and any future additions) don't drift across the bash/bash_bg/
- * agent_bg/monitor construction sites.
+ * monitor construction sites.
  */
 export function createRunningJob(args: {
     id: string;

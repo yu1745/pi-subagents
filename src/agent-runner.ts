@@ -25,7 +25,7 @@ import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import type { JobRuntime } from "./jobs/runtime.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
-import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
+import { createNestedSubagentTools, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { validateResumeSession } from "./resume-store.js";
 import { preloadSkills } from "./skill-loader.js";
@@ -232,8 +232,8 @@ export function parseExtSelectors(entries: string[]): {
  * outlive the `runAgent` call so resumed/steered turns stay scoped. pi's `dispose()`
  * clears `_eventListeners`, so they die with the session rather than leaking.
  *
- * Only meaningful when extensions are loaded — under `noExtensions`/`isolated` the
- * static `allowedToolNames` allowlist already gates the registry itself.
+ * Also required with extensions off when potential nested tools are registered:
+ * their live policy can change after construction. Isolated sessions stay static.
  */
 export function installExtensionToolScope(
   session: AgentSession,
@@ -251,7 +251,7 @@ export function installExtensionToolScope(
      * StructuredOutput is simply not a built-in, so neither survives a `keep`
      * seeded from `toolNames`.
      */
-    readmitToolNames: Set<string>;
+    readmitToolNames: Set<string> | (() => Set<string>);
   },
 ): void {
   const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames } = ctx;
@@ -280,7 +280,7 @@ export function installExtensionToolScope(
     // the renarrow keeps them in the active set and beforeToolCall doesn't
     // block them. Already vetted against `disallowed_tools` by the caller,
     // which is the only place that knows which kind may be taken back.
-    for (const name of readmitToolNames) keep.add(name);
+    for (const name of typeof readmitToolNames === "function" ? readmitToolNames() : readmitToolNames) keep.add(name);
     return keep;
   };
 
@@ -300,7 +300,7 @@ export function installExtensionToolScope(
   renarrow();
 
   session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "turn_end") renarrow();
+    if (event.type === "turn_end" || event.type === "agent_start") renarrow();
   });
 
   const priorBeforeToolCall = session.agent.beforeToolCall;
@@ -500,7 +500,6 @@ export interface RunOptions {
     manager: NestedAgentManager;
     parentAgentId: string;
     depth: number;
-    maxSubagentDepth?: number;
   };
 }
 
@@ -858,26 +857,16 @@ export async function runAgent(
     ? new Set(agentConfig.disallowedTools)
     : undefined;
 
-  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
-  // set `allowed_subagents` and a nestedRuntime was provided — and never when
-  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
-  // scoping below re-admits them explicitly (registry deny + active-set narrow).
-  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
-  // At (or past) the cap this agent can never spawn, so it can never own a child
-  // to fetch from or steer either — inject nothing rather than three tools whose
-  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
-  // "nesting off" instead of "nesting always fails".
-  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
-    ? options.nestedRuntime
-    : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated
+  // Register the potential tools once, even when recursion is off. Active scope
+  // is re-derived at normal turn boundaries, so an existing session can opt in
+  // without rebuilding its registry. Isolated agents never receive this bridge.
+  const nestedRuntime = options.nestedRuntime;
+  const nestedTools = nestedRuntime && !isolated
     ? createNestedSubagentTools({
         manager: nestedRuntime.manager,
         pi: options.pi,
         parentAgentId: nestedRuntime.parentAgentId,
         depth: nestedRuntime.depth,
-        maxSubagentDepth: effectiveMaxDepth,
-        allowedSubagents: agentConfig.allowedSubagents,
         configCwd,
       })
     : [];
@@ -900,10 +889,19 @@ export async function runAgent(
   // agent's own frontmatter can take back, while StructuredOutput exists only
   // because this call asked for a schema — removing it would make the request
   // unsatisfiable by construction rather than merely restricted.
-  const readmitToolNames = new Set([
-    ...[...nestedToolNames].filter(name => !disallowedSet?.has(name)),
-    ...structuredToolNames,
-  ]);
+  const readmitToolNames = () => {
+    // Keep collection, steering and Agent(resume) reachable for existing owned
+    // children after off/depth reductions. Agent's execute still rejects NEW
+    // spawns using the current policy; resume cannot evade that child's guard.
+    const nestedAvailable = nestedRuntime && (
+      nestedRuntime.manager.recursionPolicy.canSpawn(nestedRuntime.depth) ||
+      nestedRuntime.manager.hasOwnedChildren(nestedRuntime.parentAgentId)
+    );
+    return new Set([
+      ...[...nestedToolNames].filter(name => nestedAvailable && !disallowedSet?.has(name)),
+      ...structuredToolNames,
+    ]);
+  };
 
   // ─── Tool scoping ───────────────────────────────────────────────────────
   //
@@ -1055,7 +1053,7 @@ export async function runAgent(
   // (we can't deny the name of a tool that hasn't registered yet). Both are
   // handled below by re-deriving scope from the loader's live extension maps —
   // `registerTool` writes into those same maps, so late arrivals are judged too.
-  if (!noExtensions) {
+  if (!noExtensions || nestedTools.length > 0) {
     installExtensionToolScope(session, {
       loader,
       toolNames,

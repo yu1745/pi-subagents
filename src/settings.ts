@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
+import { isSubagentDepth } from "./recursion-policy.js";
 import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
@@ -221,10 +222,11 @@ export interface SubagentsSettings {
   /**
    * Hard ceiling on nested subagent delegation, counted from the main session:
    * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
-   * disables nesting project-wide. Read when a subagent session is built, so a
-   * change applies to agents started after it.
+   * disables nesting project-wide. Enforced live on every new nested call.
    */
   maxSubagentDepth?: number;
+  /** Allow non-isolated subagents to delegate to any enabled type. Default false. */
+  nestedAgentsEnabled?: boolean;
   /**
    * Agent type substituted when a caller-supplied `subagent_type` doesn't
    * resolve to exactly one enabled agent (unknown, disabled, or ambiguous by
@@ -327,6 +329,7 @@ export interface SettingsAppliers {
   setWorktreeIsolation: (b: boolean) => void;
   setWorkflowsEnabled: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
+  setNestedAgentsEnabled: (b: boolean) => void;
   setFallbackSubagent: (v: string | undefined) => void;
   setReportUsage: (b: boolean) => void;
   setShowCost: (b: boolean) => void;
@@ -349,7 +352,6 @@ const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>
 const MAX_CONCURRENT_CEILING = 1024;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
-const SUBAGENT_DEPTH_CEILING = 16;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
@@ -386,13 +388,8 @@ function sanitize(raw: unknown): SubagentsSettings {
   ) {
     out.graceTurns = r.graceTurns as number;
   }
-  if (
-    Number.isInteger(r.maxSubagentDepth) &&
-    (r.maxSubagentDepth as number) >= 0 &&
-    (r.maxSubagentDepth as number) <= SUBAGENT_DEPTH_CEILING
-  ) {
-    out.maxSubagentDepth = r.maxSubagentDepth as number;
-  }
+  if (isSubagentDepth(r.maxSubagentDepth)) out.maxSubagentDepth = r.maxSubagentDepth;
+  if (typeof r.nestedAgentsEnabled === "boolean") out.nestedAgentsEnabled = r.nestedAgentsEnabled;
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
     out.defaultJoinMode = r.defaultJoinMode as JoinMode;
   }
@@ -518,6 +515,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
+  if (typeof s.nestedAgentsEnabled === "boolean") appliers.setNestedAgentsEnabled(s.nestedAgentsEnabled);
   if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.backgroundByDefault === "boolean") appliers.setBackgroundByDefault(s.backgroundByDefault);

@@ -131,11 +131,15 @@ describe("the registry spawn strips internal capabilities", () => {
   it("refuses a forged nesting, so the agent cannot hide under someone else's id", async () => {
     // A nested record is filtered out of every top-level surface and inherits
     // its parent's delegation budget.
-    const { entry, id, root } = forge({ parentAgentId: "victim-agent-id", depth: 9, maxSubagentDepth: 99 });
+    const { entry, id, root, runOpts } = forge({ parentAgentId: "victim-agent-id", depth: 9, maxSubagentDepth: 99,
+      nestedAgentsEnabled: true, recursionPolicy: { canSpawn: () => true } });
 
     expect(entry.getRecord(id)).toMatchObject({
-      parentAgentId: undefined, depth: 1, maxSubagentDepth: undefined,
+      parentAgentId: undefined, depth: 1,
     });
+    expect(entry.getRecord(id)).not.toHaveProperty("maxSubagentDepth");
+    expect(runOpts().nestedRuntime).not.toHaveProperty("maxSubagentDepth");
+    expect(runOpts().nestedRuntime.manager.recursionPolicy.effective).toEqual({ nestedAgentsEnabled: false, maxSubagentDepth: 2 });
     await root.lifecycle.get("session_shutdown")?.();
   });
 

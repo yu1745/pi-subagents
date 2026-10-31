@@ -287,13 +287,8 @@ export class FleetList {
    * Sort explicitly by latest start/resume time, independent of completion state.
    */
   private agentRecords(): AgentRecord[] {
-    const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => isTopLevelAgent(a) && (a.session || (this.manager.hasJobRuntime && (a.status === "running" || a.status === "queued"))) && (
-        a.status === "running" || a.status === "queued"
-        || a.id === this.viewingAgentId
-        || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
-      ))
+      .filter(a => isTopLevelAgent(a) && (a.session || this.manager.hasJobRuntime || (a.status !== "running" && a.status !== "queued")))
       .sort((a, b) => b.startedAt - a.startedAt);
   }
 
@@ -361,8 +356,7 @@ export class FleetList {
     };
     if (!ignoreCollapse && this.collapsed.has("main")) return entries;
     entries.push(...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })));
-    const visible = this.jobs ? records.filter(record => record.session || record.status === "running" || record.status === "queued" || jobs.some(job => job.ownerAgentId === record.id))
-      : this.agentRecords();
+    const visible = this.jobs ? records : this.agentRecords();
     const owners: (AgentEntry | OwnerEntry)[] = visible.map(record => ({ kind: "agent", record }));
     // Retain only label/start metadata, never an AgentSession or execution
     // capability. Released owners keep their place among ordinary agents.
@@ -667,7 +661,7 @@ export class FleetList {
     if (row.kind === "job") {
       const job = row.job;
       const colour = job.status === "failed" || job.status === "killed" ? "error" : job.status === "completed" ? "success" : "text";
-      const label = `${job.kind === "agent" ? "process" : job.kind === "monitor" ? "monitor" : job.shell ?? "shell"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
+      const label = `${job.kind === "monitor" ? "monitor" : job.shell ?? "shell"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
       const status = `${job.status}${job.exitCode !== undefined ? ` exit=${job.exitCode}` : ""} · ${formatFleetElapsed((job.endTime ?? Date.now()) - job.startTime)}`;
       return rightAlign(`${"  ".repeat(row.depth + 1)}${this.bullet(index, sel, theme)} ${label}`, theme.fg(colour, status), width);
     }

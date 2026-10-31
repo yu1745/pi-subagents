@@ -53,7 +53,7 @@ export function statusLabel(job: Job, duration?: string): string {
 }
 
 /** "b7f3k9a2x1 [shell]: ls -la (last 80 chars)" — single line for `jobs list`.
- *  Every line carries the kind tag (shell/agent/monitor) so the unified list
+ *  Every line carries the kind tag (shell/monitor) so the unified list
  *  shows what each task is. */
 export function formatJobLine(job: Job): string {
     const head = job.name ? `${job.name} (${job.id})` : job.id;

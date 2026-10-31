@@ -12,7 +12,6 @@ import {
   getAgentConfigIn,
   getAvailableTypesIn,
   resolveEnabledTypeIn,
-  resolveTypeIn,
 } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
@@ -24,9 +23,9 @@ import {
   streamToOutputFile,
   writeInitialEntry,
 } from "./output-file.js";
+import type { RecursionPolicy } from "./recursion-policy.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import type {
-  AgentConfig,
   AgentInvocation,
   AgentRecord,
   IsolationMode,
@@ -34,17 +33,6 @@ import type {
 } from "./types.js";
 import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
-
-/**
- * Hard ceiling on nesting for every branch: main session = 0, its subagents = 1,
- * their children = 2. `0`/`1` disables nesting entirely. Set from
- * `subagents.json` (`maxSubagentDepth`). Read when a subagent session is built,
- * so a change applies to sessions started after it.
- */
-let maxSubagentDepth = 2;
-
-export function getMaxSubagentDepth(): number { return maxSubagentDepth; }
-export function setMaxSubagentDepth(n: number): void { maxSubagentDepth = Math.max(0, Math.floor(n)); }
 
 const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
 
@@ -63,12 +51,13 @@ interface NestedSpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
   depth: number;
   parentAgentId: string;
-  maxSubagentDepth: number;
   configCwd?: string;
   rootSessionId?: string;
 }
 
 export interface NestedAgentManager {
+  readonly recursionPolicy: Pick<RecursionPolicy, "effective" | "canSpawn">;
+  hasOwnedChildren(parentAgentId: string): boolean;
   spawn(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
@@ -98,9 +87,6 @@ export interface NestedToolContext {
   pi: ExtensionAPI;
   parentAgentId: string;
   depth: number;
-  maxSubagentDepth: number;
-  /** "all" = any enabled agent; string[] = only those types. Never empty. */
-  allowedSubagents: "all" | string[];
   /** Root used for agent/config discovery; may differ from the agent's working directory. */
   configCwd: string;
 }
@@ -149,25 +135,18 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   // worktree isolation, the copy). Never via registerAgents — that is
   // process-global state shared with the main session and every other agent.
   const loadRegistry = () => buildAgentRegistry(loadCustomAgents(context.configCwd));
-  const allowedTypesIn = (registry: Map<string, AgentConfig>): Set<string> | undefined =>
-    context.allowedSubagents === "all"
-      ? undefined
-      : new Set(context.allowedSubagents.map(name => resolveTypeIn(registry, name) ?? name));
-  const availableIn = (registry: Map<string, AgentConfig>): string[] => {
-    const allowed = allowedTypesIn(registry);
-    return getAvailableTypesIn(registry).filter(name => allowed === undefined || allowed.has(name));
-  };
 
   const agentTool = defineTool({
     name: NESTED_TOOL_NAMES[0],
     label: "Agent",
     description:
       "Launch a child-safe nested subagent for bounded delegated work. " +
-      "Only use agent types allowed by this parent agent; nesting is depth-limited.",
+      "Any enabled agent type is available while centralized recursion is on and below its depth cap. " +
+      "When recursion is off or capped, only resume of an owned child is allowed.",
     parameters: Type.Object({
       prompt: Type.String({ description: "Self-contained task for the nested agent." }),
       description: Type.String({ description: "Short 3-5 word task description." }),
-      subagent_type: Type.String({ description: `Allowed nested agent type. Available: ${availableIn(loadRegistry()).join(", ") || "none"}.` }),
+      subagent_type: Type.String({ description: `Allowed nested agent type. Available: ${getAvailableTypesIn(loadRegistry()).join(", ") || "none"}.` }),
       model: Type.Optional(Type.String({ description: "Optional provider/model override." })),
       thinking: Type.Optional(Type.String({ description: "Optional thinking level." })),
       max_turns: Type.Optional(Type.Number({ minimum: 1 })),
@@ -197,9 +176,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);
       }
 
-      if (context.depth >= context.maxSubagentDepth) {
+      const policy = context.manager.recursionPolicy.effective;
+      if (!context.manager.recursionPolicy.canSpawn(context.depth)) {
         return textResult(
-          `Nested subagent call blocked (depth=${context.depth}, max=${context.maxSubagentDepth}). Complete the task directly.`,
+          `Nested subagent call blocked (enabled=${policy.nestedAgentsEnabled}, depth=${context.depth}, max=${policy.maxSubagentDepth}). Complete the task directly.`,
           true,
         );
       }
@@ -207,21 +187,11 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // Reloaded per call so new agent files are picked up without a restart.
       const registry = loadRegistry();
       const rawType = params.subagent_type;
-      // Strict resolve, never the fallback policy: a project-level
-      // `fallbackSubagent` must not hand a nested caller an agent its allowlist
-      // never named. The list stays allowlist-filtered so a typo can't enumerate
-      // agents this parent may not reach.
+      // Strict resolve, never the top-level fallback policy.
       const resolvedType = resolveEnabledTypeIn(registry, rawType);
       if (resolvedType === undefined) {
         return textResult(
-          `Unknown or disabled nested agent type: "${rawType}". Allowed: ${availableIn(registry).join(", ") || "none"}.`,
-          true,
-        );
-      }
-      const allowed = allowedTypesIn(registry);
-      if (allowed !== undefined && !allowed.has(resolvedType)) {
-        return textResult(
-          `Nested agent type "${resolvedType}" is not allowed for this parent. Allowed: ${[...allowed].join(", ")}.`,
+          `Unknown or disabled nested agent type: "${rawType}". Allowed: ${getAvailableTypesIn(registry).join(", ") || "none"}.`,
           true,
         );
       }
@@ -295,7 +265,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         },
         depth: childDepth,
         parentAgentId: context.parentAgentId,
-        maxSubagentDepth: context.maxSubagentDepth,
         configCwd: context.configCwd,
         rootSessionId,
       };

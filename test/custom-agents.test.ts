@@ -111,7 +111,6 @@ max_turns: 30
 persist_session: true
 output_transcript: false
 session_dir: .seams/pi-sessions/seam-plan-reviewer
-allowed_subagents: scout, reviewer
 prompt_mode: replace
 inherit_context: true
 run_in_background: true
@@ -133,7 +132,6 @@ You are a security auditor.`);
     expect(agent.persistSession).toBe(true);
     expect(agent.outputTranscript).toBe(false);
     expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
-    expect(agent.allowedSubagents).toEqual(["scout", "reviewer"]);
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
     expect(agent.runInBackground).toBe(true);
@@ -163,7 +161,7 @@ Just a prompt.`);
     expect(agent.persistSession).toBeUndefined();
     expect(agent.outputTranscript).toBeUndefined();
     expect(agent.sessionDir).toBeUndefined();
-    expect(agent.allowedSubagents).toBeUndefined();
+    expect(agent).not.toHaveProperty("allowedSubagents");
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect(agent.runInBackground).toBeUndefined();
@@ -183,7 +181,7 @@ Just a prompt.`);
     expect(agent.systemPrompt).toBe("Just a system prompt, no frontmatter.");
   });
 
-  it("parses allowed_subagents: off by default, `all` wildcard, csv restriction", () => {
+  it("ignores removed allowed_subagents forms instead of granting privileges", () => {
     writeAgent("omitted", `---
 ---
 Off.`);
@@ -213,16 +211,13 @@ allowed_subagents: scout, reviewer
 Restricted.`);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.get("omitted")!.allowedSubagents).toBeUndefined();
-    expect(result.get("unrestricted")!.allowedSubagents).toBe("all");
-    expect(result.get("wildcard")!.allowedSubagents).toBe("all");
-    expect(result.get("mixed-case")!.allowedSubagents).toBe("all");
-    expect(result.get("none")!.allowedSubagents).toBeUndefined();
-    expect(result.get("blank")!.allowedSubagents).toBeUndefined();
-    expect(result.get("restricted")!.allowedSubagents).toEqual(["scout", "reviewer"]);
+    for (const agent of result.values()) {
+      expect(agent).not.toHaveProperty("allowedSubagents");
+      expect(serializeAgentFile(agent)).not.toContain("allowed_subagents");
+    }
   });
 
-  it("accepts booleans like extensions:/skills: do, instead of a type named \"true\"", () => {
+  it("ignores removed boolean allowed_subagents values", () => {
     writeAgent("bool-on", `---
 allowed_subagents: true
 ---
@@ -233,8 +228,8 @@ allowed_subagents: false
 Off.`);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.get("bool-on")!.allowedSubagents).toBe("all");
-    expect(result.get("bool-off")!.allowedSubagents).toBeUndefined();
+    expect(result.get("bool-on")).not.toHaveProperty("allowedSubagents");
+    expect(result.get("bool-off")).not.toHaveProperty("allowedSubagents");
   });
 
   it("handles tools: none → empty array", () => {
@@ -1092,7 +1087,6 @@ Good body.`);
         model: "anthropic/claude-haiku-4-5",
         thinking: "low",
         maxTurns: 7,
-        allowedSubagents: ["Explore"],
         excludeExtensions: ["ext-beta"],
         disallowedTools: ["write"],
         inheritContext: true,
@@ -1106,7 +1100,6 @@ Good body.`);
       expect(loaded.model).toBe("anthropic/claude-haiku-4-5");
       expect(loaded.thinking).toBe("low");
       expect(loaded.maxTurns).toBe(7);
-      expect(loaded.allowedSubagents).toEqual(["Explore"]);
       expect(loaded.excludeExtensions).toEqual(["ext-beta"]);
       expect(loaded.disallowedTools).toEqual(["write"]);
       expect(loaded.inheritContext).toBe(true);
@@ -1150,12 +1143,6 @@ Good body.`);
       const off = roundTrip({ extensions: false, skills: false });
       expect(off.extensions).toBe(false);
       expect(off.skills).toBe(false);
-    });
-
-    it("preserves allowed_subagents in both its list and `all` forms", () => {
-      expect(roundTrip({ allowedSubagents: "all" }).allowedSubagents).toBe("all");
-      expect(roundTrip({ allowedSubagents: ["Explore", "Plan"] }).allowedSubagents)
-        .toEqual(["Explore", "Plan"]);
     });
 
     it("preserves a description containing a colon", () => {

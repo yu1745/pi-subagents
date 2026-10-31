@@ -235,7 +235,7 @@ async function attachAction(
         let releaseWait!: () => void;
         const pause = new Promise<void>(resolve => { releaseWait = resolve; });
         // Steering may release only this runtime's bash waits, never monitor,
-        // agent_bg, read/write/edit, or another extension's execution.
+        // read/write/edit or another extension's execution.
         if (job.kind === "shell") reg.foreground.set(toolCallId, { requestPause: () => releaseWait() });
         let onAbort: (() => void) | undefined;
         try {

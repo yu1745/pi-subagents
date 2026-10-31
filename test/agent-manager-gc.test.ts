@@ -79,8 +79,8 @@ describe("AgentManager — record GC", () => {
 
     await vi.advanceTimersByTimeAsync(TICK);
 
-    expect(manager.getRecord(id)).toBeUndefined();
-    expect(manager.listAgents().map(a => a.id)).not.toContain(id);
+    expect(manager.getRecord(id)).toMatchObject({ result: "done", session: undefined, promise: undefined });
+    expect(manager.listAgents().map(a => a.id)).toContain(id);
     expect(dispose).toHaveBeenCalled();
   });
 
@@ -101,14 +101,14 @@ describe("AgentManager — record GC", () => {
 
     await vi.advanceTimersByTimeAsync(TICK);
 
-    expect(manager.getRecord(id)).toBeUndefined();
+    expect(manager.getRecord(id)).toMatchObject({ result: "done", session: undefined });
     expect(emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
     // After dispose() the runner is invalidated and every ctx getter throws, so an
     // emit that landed afterwards would be worse than none.
     expect(emit.mock.invocationCallOrder[0]).toBeLessThan(dispose.mock.invocationCallOrder[0]);
   });
 
-  it.each(["completed", "stopped", "error"] as const)("retains unread %s results until consumed", async status => {
+  it.each(["completed", "stopped", "error"] as const)("releases unread %s SDK sessions while retaining results after consumption", async status => {
     manager = new AgentManager();
     const { id, record } = await settled("unread");
     record.status = status;
@@ -116,9 +116,10 @@ describe("AgentManager — record GC", () => {
     record.completedAt = Date.now() - 10 * TEN_MINUTES;
     await vi.advanceTimersByTimeAsync(TICK * 5);
     expect(manager.getRecord(id)?.result).toBe("done");
+    expect(record.session).toBeUndefined();
     record.resultConsumed = true;
     await vi.advanceTimersByTimeAsync(TICK);
-    expect(manager.getRecord(id)).toBeUndefined();
+    expect(manager.getRecord(id)?.result).toBe("done");
   });
 
   it("never evicts a running agent, however old its timestamp looks", async () => {
@@ -164,7 +165,7 @@ describe("AgentManager — record GC", () => {
     expect(manager.getRecord(id)).toBeDefined(); // still inside the window
 
     await vi.advanceTimersByTimeAsync(TICK * 4);
-    expect(manager.getRecord(id)).toBeUndefined(); // aged out on a later tick
+    expect(manager.getRecord(id)).toMatchObject({ result: "done", session: undefined }); // SDK aged out
   });
 });
 
@@ -211,7 +212,7 @@ describe("AgentManager — tombstones outliving the GC", () => {
     });
   });
 
-  it("leaves nothing behind when the session was only ever in memory", async () => {
+  it("retains ephemeral history without promising a saved conversation", async () => {
     // Without a file there is no conversation to reopen, so promising a resume
     // would be a lie — the mention has to fall through to starting a new agent.
     manager = new AgentManager();
@@ -219,7 +220,7 @@ describe("AgentManager — tombstones outliving the GC", () => {
 
     await vi.advanceTimersByTimeAsync(TICK);
 
-    expect(manager.resolveMention("explore")).toBeUndefined();
+    expect(manager.resolveMention("explore")).toMatchObject({ kind: "live", record: { result: "done", session: undefined } });
     expect(manager.listTombstones()).toHaveLength(0);
   });
 
@@ -296,7 +297,7 @@ describe("AgentManager — tombstones outliving the GC", () => {
     expect(manager.getRecord(id)).toMatchObject({ handle: undefined, alias: undefined });
   });
 
-  it("stops answering a name once its tombstone is dropped", async () => {
+  it("keeps history addressable after its resume descriptor is dropped", async () => {
     manager = new AgentManager();
     await evictable("Explore", "done", "/sessions/done.jsonl");
     await vi.advanceTimersByTimeAsync(TICK);
@@ -304,11 +305,11 @@ describe("AgentManager — tombstones outliving the GC", () => {
 
     manager.dropTombstone("explore");
 
-    expect(manager.resolveMention("explore")).toBeUndefined();
+    expect(manager.resolveMention("explore")).toMatchObject({ kind: "live", record: { result: "done" } });
     expect(manager.listTombstones()).toHaveLength(0);
   });
 
-  it("frees a dropped name for the next agent of that type", async () => {
+  it("reserves historical handles even when a resume descriptor is dropped", async () => {
     // Otherwise a resumed agent's own handle stays reserved by the corpse and
     // every later spawn climbs: explore-2, explore-3, …
     manager = new AgentManager();
@@ -319,7 +320,7 @@ describe("AgentManager — tombstones outliving the GC", () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const id = manager.spawn(mockPi, mockCtx, "Explore", "next", { description: "next", isBackground: true });
 
-    expect(manager.getRecord(id)!.handle).toBe("explore");
+    expect(manager.getRecord(id)!.handle).toBe("explore-2");
   });
 
   it("forgets every name when the session ends", async () => {

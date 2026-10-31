@@ -33,7 +33,7 @@ export interface SpawnResult {
  * data path. Progress is read back by polling the file tail separately.
  *
  * Pass `command` to run `bash -c <command>`, or `file`/`fileArgs` to exec a
- * binary directly (e.g. agent_bg launching `pi -p`). The child is detached so
+ * binary directly. The child is detached so
  * the whole process group can be signalled.
  */
 export function spawnWithFileOutput(args: {

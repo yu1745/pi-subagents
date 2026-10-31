@@ -10,8 +10,7 @@
  * root manager lifecycle.
  *
  * Extracted from codesoda/pi-subagents#2 (test-only follow-up to #164) and
- * reconciled with the merged #164 frontmatter contract (`allowed_subagents`
- * opt-in; no nested tools injected at the depth cap).
+ * now using the centralized recursion switch (inactive tools at the depth cap).
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -126,12 +125,13 @@ function writeAgents(cwd: string, agents: Record<string, string>): void {
 async function runWithAgents(
   agents: Record<string, string>,
   respond: FauxResponder,
-  options: { prompt: string; maxModelCalls?: number; hold?: boolean } = {
+  options: { prompt: string; maxModelCalls?: number; hold?: boolean; nestedAgentsEnabled?: boolean } = {
     prompt: "root",
   },
 ): Promise<{ run: PrintModeRun; cwd: string }> {
   const cwd = mkdtempSync(join(tmpdir(), "subagents-nested-e2e-"));
   writeAgents(cwd, agents);
+  writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ nestedAgentsEnabled: options.nestedAgentsEnabled ?? true }));
   const run = await runPrintMode({
     ...options,
     cwd,
@@ -175,7 +175,7 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
         }
         return lastToolResult(ctx, "Agent");
       },
-      { prompt: "root-default" },
+      { prompt: "root-default", nestedAgentsEnabled: false },
     ));
 
     expect(run.responseText).toContain("PLAIN_CHILD_RESULT");
@@ -186,12 +186,12 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
   it("strips nested tools at the depth cap instead of injecting always-failing ones", async () => {
     // Default maxSubagentDepth is 2: main(0) → level_one(1) → level_two(2).
     // #164 injects nested tools only while depth < max, so the agent at the cap
-    // never sees Agent/get/steer even when it opts in via allowed_subagents.
+    // never sees Agent/get/steer even with the centralized switch on.
     const observed = new Map<string, string[]>();
     ({ run, cwd } = await runWithAgents(
       {
-        level_one: "allowed_subagents: level_two\n",
-        level_two: "allowed_subagents: level_three\n",
+        level_one: "",
+        level_two: "",
         level_three: "",
       },
       (ctx) => {
@@ -239,7 +239,7 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
     const calls = new Map<string, number>();
     ({ run, cwd } = await runWithAgents(
       {
-        background_delegator: "allowed_subagents: background_grandchild\n",
+        background_delegator: "",
         background_grandchild: "",
       },
       async (ctx) => {
@@ -327,9 +327,9 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
     try {
       ({ run, cwd } = await runWithAgents(
         {
-          owner: "allowed_subagents: owned_child\n",
-          // Unrestricted nested allowlist — still ownership-scoped at runtime.
-          probe: "allowed_subagents: all\n",
+          owner: "",
+          // Centrally enabled — still ownership-scoped at runtime.
+          probe: "",
           owned_child: "",
         },
         async (ctx) => {

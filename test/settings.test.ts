@@ -50,6 +50,19 @@ describe("settings persistence", () => {
     writeFileSync(projectFile(), JSON.stringify(obj));
   }
 
+  it("merges validated recursion policy with project precedence", () => {
+    writeGlobal({ nestedAgentsEnabled: true, maxSubagentDepth: 4 });
+    expect(loadSettings(projectDir)).toMatchObject({ nestedAgentsEnabled: true, maxSubagentDepth: 4 });
+    writeProject({ nestedAgentsEnabled: false, maxSubagentDepth: 0 });
+    expect(loadSettings(projectDir)).toMatchObject({ nestedAgentsEnabled: false, maxSubagentDepth: 0 });
+    for (const invalid of [-1, 17, 1.5, "2", null]) {
+      writeProject({ nestedAgentsEnabled: "on", maxSubagentDepth: invalid });
+      expect(loadSettings(projectDir)).toMatchObject({ nestedAgentsEnabled: true, maxSubagentDepth: 4 });
+    }
+    writeProject({ nestedAgentsEnabled: true, maxSubagentDepth: 16 });
+    expect(loadSettings(projectDir)).toMatchObject({ nestedAgentsEnabled: true, maxSubagentDepth: 16 });
+  });
+
   it("returns {} when both files are missing", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
@@ -532,6 +545,7 @@ describe("settings persistence", () => {
 
     beforeEach(() => {
       appliers = {
+        setNestedAgentsEnabled: vi.fn(),
         setMaxConcurrent: vi.fn(),
         setMaxConcurrentForeground: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
@@ -608,6 +622,13 @@ describe("settings persistence", () => {
       // whole suite green while `subagents.json` silently stops working.
       applySettings({ fallbackSubagent: "none" }, appliers);
       expect(appliers.setFallbackSubagent).toHaveBeenCalledWith("none");
+    });
+
+    it("applies both explicit recursion switch values", () => {
+      for (const enabled of [true, false]) {
+        applySettings({ nestedAgentsEnabled: enabled }, appliers);
+        expect(appliers.setNestedAgentsEnabled).toHaveBeenLastCalledWith(enabled);
+      }
     });
 
     it("applies only the fields that are present", () => {
@@ -783,6 +804,7 @@ describe("settings persistence", () => {
 
     beforeEach(() => {
       appliers = {
+        setNestedAgentsEnabled: vi.fn(),
         setMaxConcurrent: vi.fn(),
         setMaxConcurrentForeground: vi.fn(),
         setDefaultMaxTurns: vi.fn(),

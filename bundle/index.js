@@ -179,9 +179,6 @@ function resolveKeyIn(registry, name) {
 function resolveKey(name) {
   return resolveKeyIn(agents, name);
 }
-function resolveTypeIn(registry, name) {
-  return resolveKeyIn(registry, name);
-}
 function getAgentConfigIn(registry, name) {
   const key = resolveKeyIn(registry, name);
   return key ? registry.get(key) : void 0;
@@ -306,7 +303,6 @@ var init_agent_types = __esm({
     __name(registerAgents, "registerAgents");
     __name(resolveKeyIn, "resolveKeyIn");
     __name(resolveKey, "resolveKey");
-    __name(resolveTypeIn, "resolveTypeIn");
     __name(getAgentConfigIn, "getAgentConfigIn");
     __name(getAvailableTypesIn, "getAvailableTypesIn");
     __name(resolveUnambiguousKeyIn, "resolveUnambiguousKeyIn");
@@ -496,7 +492,6 @@ function loadFromDir(dir, agents2, source, strict) {
       persistSession: fm.persist_session != null ? fm.persist_session === true : void 0,
       outputTranscript: fm.output_transcript != null ? fm.output_transcript !== false : void 0,
       sessionDir: str(fm.session_dir),
-      allowedSubagents: parseAllowedSubagents(fm.allowed_subagents),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : void 0,
@@ -546,12 +541,6 @@ function parseCsvField(val) {
   if (!s || s === "none") return void 0;
   const items = s.split(",").map((t) => t.trim()).filter(Boolean);
   return items.length > 0 ? items : void 0;
-}
-function parseAllowedSubagents(val) {
-  if (typeof val === "boolean") return val ? "all" : void 0;
-  const items = parseCsvField(val);
-  if (!items) return void 0;
-  return items.some((i) => i === "*" || i.toLowerCase() === "all") ? "all" : items;
 }
 function csvList(val, defaults) {
   if (val === void 0 || val === null) return defaults;
@@ -603,7 +592,6 @@ var init_custom_agents = __esm({
     __name(str, "str");
     __name(nonNegativeInt, "nonNegativeInt");
     __name(parseCsvField, "parseCsvField");
-    __name(parseAllowedSubagents, "parseAllowedSubagents");
     __name(csvList, "csvList");
     __name(parseToolsField, "parseToolsField");
     __name(csvListOptional, "csvListOptional");
@@ -1532,12 +1520,6 @@ import {
   defineTool
 } from "@earendil-works/pi-coding-agent";
 import { Type as Type2 } from "@sinclair/typebox";
-function getMaxSubagentDepth() {
-  return maxSubagentDepth;
-}
-function setMaxSubagentDepth(n) {
-  maxSubagentDepth = Math.max(0, Math.floor(n));
-}
 function textResult(text, isError = false) {
   return { content: [{ type: "text", text }], isError, details: {} };
 }
@@ -1559,19 +1541,14 @@ ${text}` : text;
 }
 function createNestedSubagentTools(context) {
   const loadRegistry = /* @__PURE__ */ __name(() => buildAgentRegistry(loadCustomAgents(context.configCwd)), "loadRegistry");
-  const allowedTypesIn = /* @__PURE__ */ __name((registry) => context.allowedSubagents === "all" ? void 0 : new Set(context.allowedSubagents.map((name) => resolveTypeIn(registry, name) ?? name)), "allowedTypesIn");
-  const availableIn = /* @__PURE__ */ __name((registry) => {
-    const allowed = allowedTypesIn(registry);
-    return getAvailableTypesIn(registry).filter((name) => allowed === void 0 || allowed.has(name));
-  }, "availableIn");
   const agentTool = defineTool({
     name: NESTED_TOOL_NAMES[0],
     label: "Agent",
-    description: "Launch a child-safe nested subagent for bounded delegated work. Only use agent types allowed by this parent agent; nesting is depth-limited.",
+    description: "Launch a child-safe nested subagent for bounded delegated work. Any enabled agent type is available while centralized recursion is on and below its depth cap. When recursion is off or capped, only resume of an owned child is allowed.",
     parameters: Type2.Object({
       prompt: Type2.String({ description: "Self-contained task for the nested agent." }),
       description: Type2.String({ description: "Short 3-5 word task description." }),
-      subagent_type: Type2.String({ description: `Allowed nested agent type. Available: ${availableIn(loadRegistry()).join(", ") || "none"}.` }),
+      subagent_type: Type2.String({ description: `Allowed nested agent type. Available: ${getAvailableTypesIn(loadRegistry()).join(", ") || "none"}.` }),
       model: Type2.Optional(Type2.String({ description: "Optional provider/model override." })),
       thinking: Type2.Optional(Type2.String({ description: "Optional thinking level." })),
       max_turns: Type2.Optional(Type2.Number({ minimum: 1 })),
@@ -1598,9 +1575,10 @@ function createNestedSubagentTools(context) {
         });
         return resumed ? textResult(formatRecord(resumed, "inline"), resumed.status === "error") : textResult(`Failed to resume nested agent "${params.resume}".`, true);
       }
-      if (context.depth >= context.maxSubagentDepth) {
+      const policy = context.manager.recursionPolicy.effective;
+      if (!context.manager.recursionPolicy.canSpawn(context.depth)) {
         return textResult(
-          `Nested subagent call blocked (depth=${context.depth}, max=${context.maxSubagentDepth}). Complete the task directly.`,
+          `Nested subagent call blocked (enabled=${policy.nestedAgentsEnabled}, depth=${context.depth}, max=${policy.maxSubagentDepth}). Complete the task directly.`,
           true
         );
       }
@@ -1609,14 +1587,7 @@ function createNestedSubagentTools(context) {
       const resolvedType = resolveEnabledTypeIn(registry, rawType);
       if (resolvedType === void 0) {
         return textResult(
-          `Unknown or disabled nested agent type: "${rawType}". Allowed: ${availableIn(registry).join(", ") || "none"}.`,
-          true
-        );
-      }
-      const allowed = allowedTypesIn(registry);
-      if (allowed !== void 0 && !allowed.has(resolvedType)) {
-        return textResult(
-          `Nested agent type "${resolvedType}" is not allowed for this parent. Allowed: ${[...allowed].join(", ")}.`,
+          `Unknown or disabled nested agent type: "${rawType}". Allowed: ${getAvailableTypesIn(registry).join(", ") || "none"}.`,
           true
         );
       }
@@ -1680,7 +1651,6 @@ function createNestedSubagentTools(context) {
         }, "onAssistantUsage"),
         depth: childDepth,
         parentAgentId: context.parentAgentId,
-        maxSubagentDepth: context.maxSubagentDepth,
         configCwd: context.configCwd,
         rootSessionId
       };
@@ -1770,7 +1740,7 @@ function createNestedSubagentTools(context) {
   });
   return [agentTool, resultTool, steerTool];
 }
-var maxSubagentDepth, NESTED_TOOL_NAMES;
+var NESTED_TOOL_NAMES;
 var init_nested_tools = __esm({
   "src/nested-tools.ts"() {
     "use strict";
@@ -1783,9 +1753,6 @@ var init_nested_tools = __esm({
     init_status_note();
     init_usage();
     init_worktree();
-    maxSubagentDepth = 2;
-    __name(getMaxSubagentDepth, "getMaxSubagentDepth");
-    __name(setMaxSubagentDepth, "setMaxSubagentDepth");
     NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
     __name(textResult, "textResult");
     __name(ownsRecord, "ownsRecord");
@@ -1890,8 +1857,13 @@ function validateResumeSession(path, sessionId) {
   }
 }
 function isDescriptor(value) {
-  if (!object(value) || typeof value.id !== "string" || !value.id || typeof value.handle !== "string" || !/^[a-z0-9_-]{1,64}$/.test(value.handle) || value.alias !== void 0 && (typeof value.alias !== "string" || !/^[a-z0-9_-]{1,64}$/.test(value.alias)) || typeof value.type !== "string" || !value.type || typeof value.description !== "string" || typeof value.sessionFile !== "string" || !isAbsolute(value.sessionFile) || typeof value.completedAt !== "number" || !Number.isFinite(value.completedAt)) return false;
+  if (!object(value) || typeof value.id !== "string" || !value.id || typeof value.handle !== "string" || !/^[a-z0-9_-]{1,64}$/.test(value.handle) || value.alias !== void 0 && (typeof value.alias !== "string" || !/^[a-z0-9_-]{1,64}$/.test(value.alias)) || typeof value.type !== "string" || !value.type || typeof value.description !== "string" || typeof value.sessionFile !== "string" || !isAbsolute(value.sessionFile) && !(value.sessionFile === "" && object(value.history)) || typeof value.completedAt !== "number" || !Number.isFinite(value.completedAt)) return false;
+  if (value.history !== void 0) {
+    const h = value.history;
+    if (!object(h) || !["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(h.status) || typeof h.startedAt !== "number" || !Number.isFinite(h.startedAt) || typeof h.toolUses !== "number" || typeof h.compactionCount !== "number" || !object(h.lifetimeUsage) || ["result", "error", "outputFile"].some((key) => h[key] !== void 0 && typeof h[key] !== "string")) return false;
+  }
   const state = value.resumeState;
+  if (state === void 0 && value.history !== void 0) return true;
   return object(state) && typeof state.sessionId === "string" && state.sessionId.length > 0 && typeof state.cwd === "string" && isAbsolute(state.cwd) && typeof state.configCwd === "string" && isAbsolute(state.configCwd) && typeof state.isolated === "boolean" && (state.worktreeBase === void 0 || typeof state.worktreeBase === "string" && isAbsolute(state.worktreeBase)) && (state.maxTurns === void 0 || typeof state.maxTurns === "number" && Number.isFinite(state.maxTurns) && state.maxTurns >= 0) && (state.thinkingLevel === void 0 || ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(state.thinkingLevel)) && (state.invocation === void 0 || object(state.invocation));
 }
 var ResumeStore;
@@ -1915,7 +1887,7 @@ var init_resume_store = __esm({
         }
         try {
           const data = JSON.parse(text);
-          if (!object(data) || data.version !== 1 || data.parentId !== parentId || !Array.isArray(data.agents)) throw new Error("invalid registry envelope");
+          if (!object(data) || ![1, 2].includes(data.version) || data.parentId !== parentId || !Array.isArray(data.agents)) throw new Error("invalid registry envelope");
           const handles = /* @__PURE__ */ new Set();
           for (const entry of data.agents) {
             if (!isDescriptor(entry) || this.entries.has(entry.id)) throw new Error("invalid or duplicate agent descriptor");
@@ -1950,7 +1922,7 @@ var init_resume_store = __esm({
           chmodSync2(dir, 448);
           const fd = openSync(temp, "wx", 384);
           try {
-            writeFileSync2(fd, JSON.stringify({ version: 1, parentId: this.parentId, agents: [...next.values()] }) + "\n");
+            writeFileSync2(fd, JSON.stringify({ version: 2, parentId: this.parentId, agents: [...next.values()] }) + "\n");
             fsyncSync(fd);
           } finally {
             closeSync(fd);
@@ -2236,7 +2208,7 @@ function installExtensionToolScope(session, ctx) {
       }
     }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
-    for (const name of readmitToolNames) keep.add(name);
+    for (const name of typeof readmitToolNames === "function" ? readmitToolNames() : readmitToolNames) keep.add(name);
     return keep;
   }, "inScope");
   const renarrow = /* @__PURE__ */ __name(() => {
@@ -2249,7 +2221,7 @@ function installExtensionToolScope(session, ctx) {
   }, "renarrow");
   renarrow();
   session.subscribe((event) => {
-    if (event.type === "turn_end") renarrow();
+    if (event.type === "turn_end" || event.type === "agent_start") renarrow();
   });
   const priorBeforeToolCall = session.agent.beforeToolCall;
   session.agent.beforeToolCall = async (context, signal) => {
@@ -2489,25 +2461,25 @@ async function runAgent(ctx, type, prompt, options) {
   );
   const thinkingLevel = options.resumeSessionFile ? void 0 : options.thinkingLevel ?? agentConfig?.thinking;
   const disallowedSet = agentConfig?.disallowedTools ? new Set(agentConfig.disallowedTools) : void 0;
-  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
-  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth ? options.nestedRuntime : void 0;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated ? createNestedSubagentTools({
+  const nestedRuntime = options.nestedRuntime;
+  const nestedTools = nestedRuntime && !isolated ? createNestedSubagentTools({
     manager: nestedRuntime.manager,
     pi: options.pi,
     parentAgentId: nestedRuntime.parentAgentId,
     depth: nestedRuntime.depth,
-    maxSubagentDepth: effectiveMaxDepth,
-    allowedSubagents: agentConfig.allowedSubagents,
     configCwd
   }) : [];
   const nestedToolNames = new Set(nestedTools.map((tool) => tool.name));
   const structuredCapture = options.structuredOutput ? createStructuredCapture() : void 0;
   const structuredTools = options.structuredOutput && structuredCapture ? [createStructuredOutputTool(options.structuredOutput, structuredCapture)] : [];
   const structuredToolNames = new Set(structuredTools.map((tool) => tool.name));
-  const readmitToolNames = /* @__PURE__ */ new Set([
-    ...[...nestedToolNames].filter((name) => !disallowedSet?.has(name)),
-    ...structuredToolNames
-  ]);
+  const readmitToolNames = /* @__PURE__ */ __name(() => {
+    const nestedAvailable = nestedRuntime && (nestedRuntime.manager.recursionPolicy.canSpawn(nestedRuntime.depth) || nestedRuntime.manager.hasOwnedChildren(nestedRuntime.parentAgentId));
+    return /* @__PURE__ */ new Set([
+      ...[...nestedToolNames].filter((name) => nestedAvailable && !disallowedSet?.has(name)),
+      ...structuredToolNames
+    ]);
+  }, "readmitToolNames");
   const builtinToolNameSet = new Set(toolNames);
   let sessionTools;
   let sessionExcludeTools;
@@ -2588,7 +2560,7 @@ async function runAgent(ctx, type, prompt, options) {
       });
     }, "onError")
   });
-  if (!noExtensions) {
+  if (!noExtensions || nestedTools.length > 0) {
     installExtensionToolScope(session, {
       loader,
       toolNames,
@@ -2883,6 +2855,64 @@ var init_mention = __esm({
     __name(describeMention, "describeMention");
     __name(agentMentionReminder, "agentMentionReminder");
     __name(parseMention, "parseMention");
+  }
+});
+
+// src/recursion-policy.ts
+function isSubagentDepth(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= SUBAGENT_DEPTH_CEILING;
+}
+var SUBAGENT_DEPTH_CEILING, RecursionPolicy;
+var init_recursion_policy = __esm({
+  "src/recursion-policy.ts"() {
+    "use strict";
+    SUBAGENT_DEPTH_CEILING = 16;
+    __name(isSubagentDepth, "isSubagentDepth");
+    RecursionPolicy = class {
+      static {
+        __name(this, "RecursionPolicy");
+      }
+      baseline = { nestedAgentsEnabled: false, maxSubagentDepth: 2 };
+      overrides = {};
+      get configured() {
+        return { ...this.baseline };
+      }
+      get effective() {
+        return { ...this.baseline, ...this.overrides };
+      }
+      configure(settings) {
+        this.baseline = {
+          nestedAgentsEnabled: settings.nestedAgentsEnabled ?? false,
+          maxSubagentDepth: settings.maxSubagentDepth ?? 2
+        };
+      }
+      reset() {
+        this.overrides = {};
+      }
+      canSpawn(depth) {
+        const policy = this.effective;
+        return policy.nestedAgentsEnabled && depth < policy.maxSubagentDepth;
+      }
+      /** Validate the whole command before changing either override. */
+      command(args) {
+        const words = args.trim().toLowerCase().split(/\s+/);
+        const action = words[0];
+        if (words.length === 1 && (action === "on" || action === "off")) {
+          this.overrides.nestedAgentsEnabled = action === "on";
+        } else if (words.length === 2 && action === "depth" && /^\d+$/.test(words[1]) && isSubagentDepth(Number(words[1]))) {
+          this.overrides.maxSubagentDepth = Number(words[1]);
+        } else if (words.length === 1 && action === "reset") {
+          this.reset();
+        } else if (words.length !== 1 || action !== "status" && action !== "") {
+          return { message: `Use /subagent-recursion on|off|depth N|status|reset (depth 0-${SUBAGENT_DEPTH_CEILING}).`, level: "warning" };
+        }
+        const effective = this.effective;
+        return {
+          message: `Subagent recursion: enabled=${effective.nestedAgentsEnabled}, depth=${effective.maxSubagentDepth}. Configuration baseline: enabled=${this.baseline.nestedAgentsEnabled}, depth=${this.baseline.maxSubagentDepth}. Session overrides: enabled=${this.overrides.nestedAgentsEnabled ?? "none"}, depth=${this.overrides.maxSubagentDepth ?? "none"}.`,
+          level: "info"
+        };
+      }
+    };
   }
 });
 
@@ -4314,6 +4344,7 @@ var init_agent_manager = __esm({
     init_agent_types();
     init_mention();
     init_model_resolver();
+    init_recursion_policy();
     init_resume_store();
     init_native_pi_1_2();
     init_session_snapshot();
@@ -4331,8 +4362,13 @@ var init_agent_manager = __esm({
       static {
         __name(this, "AgentManager");
       }
+      recursionPolicy = new RecursionPolicy();
+      hasOwnedChildren(parentAgentId) {
+        return [...this.agents.values()].some((record2) => record2.parentAgentId === parentAgentId);
+      }
       agents = /* @__PURE__ */ new Map();
       store;
+      persistenceParent;
       persistenceError;
       recordStores = /* @__PURE__ */ new WeakMap();
       inFlight = /* @__PURE__ */ new Set();
@@ -4403,16 +4439,70 @@ var init_agent_manager = __esm({
         this.cleanupInterval = setInterval(() => this.cleanup(), 6e4);
         this.cleanupInterval.unref();
       }
-      /** Load lazy descriptors only. No child sessions or interrupted tasks are started. */
+      /** Restore lightweight history only. No SDK sessions or interrupted tasks are started. */
       configurePersistence(parentFile, parentId) {
         if (this.disposed) throw new Error("Agent manager is shutting down");
+        const parent = `${parentFile ?? ""}:${parentId}`;
+        if (this.persistenceParent !== void 0 && this.persistenceParent !== parent) {
+          for (const record2 of this.agents.values()) {
+            if (record2.status === "running" || record2.status === "queued") record2.error = "Interrupted by parent session switch; task was not restarted.";
+          }
+          this.abortAll();
+          for (const [id, record2] of this.agents) {
+            if (!this.inFlight.has(id)) continue;
+            this.persistSettled(record2);
+            const startup = this.startups.get(id);
+            this.agents.delete(id);
+            const shutdown = (async () => {
+              try {
+                await startup;
+                await record2.promise;
+              } catch {
+              }
+              await shutdownChildSession(record2.session);
+              record2.session = void 0;
+            })().finally(() => {
+              this.closing.delete(id);
+            });
+            this.closing.set(id, shutdown);
+          }
+          this.clearCompleted();
+        }
+        this.persistenceParent = parent;
         this.store = void 0;
         this.persistenceError = void 0;
         this.tombstones.clear();
         if (!parentFile) return;
         try {
           this.store = new ResumeStore(parentFile, parentId);
-          for (const entry of this.store.list()) this.tombstones.set(entry.handle, entry);
+          for (const entry of this.store.list()) {
+            this.tombstones.set(entry.handle, entry);
+            if (this.agents.has(entry.id)) continue;
+            const record2 = {
+              id: entry.id,
+              type: entry.type,
+              handle: entry.handle,
+              alias: entry.alias,
+              description: entry.description,
+              sessionFile: entry.sessionFile || void 0,
+              resumeState: entry.resumeState,
+              status: entry.status ?? "stopped",
+              startedAt: entry.completedAt,
+              completedAt: entry.completedAt,
+              toolUses: 0,
+              lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+              compactionCount: 0,
+              ...entry.history
+            };
+            if (!entry.history) record2.error = "Historical result unavailable: legacy registry stored identity only.";
+            if (record2.status === "running" || record2.status === "queued") {
+              record2.status = "stopped";
+              record2.error = "Interrupted by Pi process exit; task was not restarted.";
+              record2.completedAt = Date.now();
+            }
+            this.agents.set(record2.id, record2);
+            this.recordStores.set(record2, this.store);
+          }
         } catch (error) {
           this.persistenceError = error instanceof Error ? error : new Error(String(error));
           throw this.persistenceError;
@@ -4420,17 +4510,19 @@ var init_agent_manager = __esm({
       }
       /** Save while the child exists, not only when the ten-minute GC happens. */
       persistRecord(record2) {
-        if (!record2.handle || !record2.sessionFile || !record2.resumeState) return;
+        if (!record2.handle || !this.recordStores.has(record2)) return;
+        const { startedAt, completedAt, status, result, error, toolUses, lifetimeUsage, compactionCount, resultConsumed, isBackground, invocation, worktreeResult, outputFile } = record2;
         const entry = {
           id: record2.id,
           type: record2.type,
           handle: record2.handle,
           alias: record2.alias,
           description: record2.description,
-          sessionFile: record2.sessionFile,
+          sessionFile: record2.sessionFile ?? "",
           completedAt: record2.completedAt ?? Date.now(),
           status: record2.status,
-          resumeState: { ...record2.resumeState, invocation: record2.invocation }
+          resumeState: record2.resumeState ? { ...record2.resumeState, invocation: record2.invocation } : void 0,
+          history: { startedAt, completedAt, status, result, error, toolUses, lifetimeUsage, compactionCount, resultConsumed, isBackground, invocation, worktreeResult, outputFile }
         };
         this.recordStores.get(record2)?.put(entry);
         if (this.agents.get(record2.id) === record2) this.tombstones.set(entry.handle, entry);
@@ -4496,8 +4588,8 @@ var init_agent_manager = __esm({
         const restore = options.restore;
         if (restore) {
           type = restore.type;
-          if (!restore.resumeState) throw new Error(`Agent "${restore.id}" has no saved execution metadata to resume safely`);
-          if (this.agents.has(restore.id) || this.inFlight.has(restore.id)) throw new Error(`Agent "${restore.id}" is still running or settling`);
+          if (!restore.resumeState || !restore.sessionFile) throw new Error(`Agent "${restore.id}" has no saved execution metadata/checkpoint to resume safely`);
+          if (this.agents.get(restore.id)?.session || ["running", "queued"].includes(this.agents.get(restore.id)?.status ?? "") || this.inFlight.has(restore.id)) throw new Error(`Agent "${restore.id}" is still running or settling`);
           validateResumeSession(restore.sessionFile, restore.resumeState.sessionId);
           options = {
             ...options,
@@ -4533,11 +4625,11 @@ var init_agent_manager = __esm({
           // that queues flips to "queued" there rather than being guessed at here,
           // since the pool decision needs the finished record.
           status: options.isBackground ? "queued" : "running",
-          toolUses: 0,
+          toolUses: restore?.history?.toolUses ?? 0,
           startedAt: Date.now(),
           abortController,
-          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
-          compactionCount: 0,
+          lifetimeUsage: restore?.history ? { ...restore.history.lifetimeUsage } : { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+          compactionCount: restore?.history?.compactionCount ?? 0,
           // Raw tri-state (not coerced to a boolean): true = background, false =
           // foreground (has an inline tool-result surface), undefined = caller never
           // declared it (e.g. a cross-extension RPC spawn). The widget's background-
@@ -4552,11 +4644,10 @@ var init_agent_manager = __esm({
           depth: options.depth ?? 1,
           parentAgentId: options.parentAgentId,
           workflowId: options.workflowId,
-          maxSubagentDepth: options.maxSubagentDepth,
           rootSessionId: options.rootSessionId
         };
         this.agents.set(id, record2);
-        if (this.store) this.recordStores.set(record2, this.store);
+        if (this.store && isTopLevelAgent(record2) && (getAgentConfig(type)?.persistSession ?? getRememberAgents())) this.recordStores.set(record2, this.store);
         if (restore) {
           record2.sessionFile = restore.sessionFile;
           record2.resumeState = restore.resumeState;
@@ -4564,6 +4655,7 @@ var init_agent_manager = __esm({
         if (record2.handle !== void 0 && record2.alias === void 0 && options.name !== void 0) {
           record2.alias = assignHandle(handleBase(options.name), this.takenHandles());
         }
+        this.persistSettled(record2);
         const args = { pi, ctx, type, prompt, options };
         const pool = this.poolFor(record2);
         if (pool !== void 0 && !options.bypassQueue && !this.poolHasRoom(pool)) {
@@ -4607,6 +4699,7 @@ var init_agent_manager = __esm({
           if (record2) {
             record2.status = "stopped";
             record2.completedAt = Date.now();
+            this.persistSettled(record2);
           }
           return false;
         }
@@ -4640,10 +4733,15 @@ var init_agent_manager = __esm({
               record2.status = "error";
               record2.error = err instanceof Error ? err.message : String(err);
               record2.completedAt = Date.now();
-              this.onComplete?.(record2);
+              if (this.agents.get(id) === record2) this.onComplete?.(record2);
+            } else if (isTopLevelAgent(record2)) {
+              record2.status = "error";
+              record2.error = err instanceof Error ? err.message : String(err);
+              record2.completedAt = Date.now();
             } else {
               this.agents.delete(id);
             }
+            this.persistSettled(record2);
             this.drainQueue();
             throw err;
           }
@@ -4714,6 +4812,7 @@ var init_agent_manager = __esm({
             return;
           }
         }
+        this.persistSettled(record2);
         this.onStart?.(record2);
         let detachParentSignal;
         if (options.signal) {
@@ -4773,8 +4872,7 @@ var init_agent_manager = __esm({
           nestedRuntime: {
             manager: this,
             parentAgentId: id,
-            depth: record2.depth ?? 1,
-            maxSubagentDepth: record2.maxSubagentDepth
+            depth: record2.depth ?? 1
           },
           onSessionCreated: /* @__PURE__ */ __name(async (session) => {
             if (this.disposed || this.agents.get(id) !== record2 || record2.abortController?.signal.aborted) {
@@ -4917,17 +5015,19 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
        */
       settleRun(record2, guardCallback, pool) {
         this.inFlight.delete(record2.id);
-        this.persistSettled(record2);
         if (!record2.isBackground) record2.resultConsumed = true;
+        this.persistSettled(record2);
         if (pool === "background") this.runningBackground--;
         else if (pool === "foreground") this.runningForeground--;
-        if (guardCallback) {
-          try {
+        if (this.agents.get(record2.id) === record2) {
+          if (guardCallback) {
+            try {
+              this.onComplete?.(record2);
+            } catch {
+            }
+          } else {
             this.onComplete?.(record2);
-          } catch {
           }
-        } else {
-          this.onComplete?.(record2);
         }
         if (record2.isBackground || pool !== void 0) this.drainQueue();
       }
@@ -5033,6 +5133,7 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
           record2.completedAt = void 0;
           record2.abortController = void 0;
           record2.status = "queued";
+          this.persistSettled(record2);
           const start = /* @__PURE__ */ __name(() => this.startResume(id, record2, prompt, signal, options), "start");
           if (occupiesPoolSlot(record2) && !this.poolHasRoom("background")) {
             this.queue.push({
@@ -5045,7 +5146,8 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
                   record2.status = "error";
                   record2.error = err instanceof Error ? err.message : String(err);
                   record2.completedAt = Date.now();
-                  this.onComplete?.(record2);
+                  this.persistSettled(record2);
+                  if (this.agents.get(id) === record2) this.onComplete?.(record2);
                 }
               }, "start"),
               release: /* @__PURE__ */ __name(() => {
@@ -5065,6 +5167,7 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
         record2.completedAt = void 0;
         record2.result = void 0;
         record2.error = void 0;
+        this.persistSettled(record2);
         let detachParentSignal;
         if (signal) {
           if (signal.aborted) this.abort(id);
@@ -5130,6 +5233,7 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
         record2.status = "running";
         record2.startedAt = Date.now();
         if (occupiesPoolSlot(record2)) this.runningBackground++;
+        this.persistSettled(record2);
         this.onStart?.(record2);
         const abortController = new AbortController();
         record2.abortController = abortController;
@@ -5158,9 +5262,11 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
           }
           this.abortOwnedChildren(id);
           if (occupiesPoolSlot(record2)) this.runningBackground--;
-          try {
-            this.onComplete?.(record2);
-          } catch {
+          if (this.agents.get(record2.id) === record2) {
+            try {
+              this.onComplete?.(record2);
+            } catch {
+            }
           }
           this.drainQueue();
         }, "settle");
@@ -5235,6 +5341,14 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
         if (result === "handled") throw new Error("Child input was intercepted by another extension; steer receipt is unconfirmed");
         return true;
       }
+      /** Consumption suppresses notifications; it never removes historical output. */
+      consumeResult(id) {
+        const record2 = this.resolveAgentRef(id);
+        if (!record2 || record2.status === "running" || record2.status === "queued") return false;
+        record2.resultConsumed = true;
+        this.persistSettled(record2);
+        return true;
+      }
       getRecord(id) {
         return this.agents.get(id);
       }
@@ -5299,9 +5413,15 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
           if (record2.status === "running" || record2.status === "queued") return { kind: "live", record: record2 };
           if (!fallback || record2.startedAt > fallback.startedAt) fallback = record2;
         }
-        if (fallback) return { kind: "live", record: fallback };
+        if (fallback) {
+          const entry = this.tombstones.get(fallback.handle ?? "");
+          return !fallback.session && entry ? { kind: "tombstone", entry } : { kind: "live", record: fallback };
+        }
         const byId = this.agents.get(name);
-        if (byId !== void 0 && isTopLevelAgent(byId)) return { kind: "live", record: byId };
+        if (byId !== void 0 && isTopLevelAgent(byId)) {
+          const entry = this.tombstones.get(byId.handle ?? "");
+          return !byId.session && entry ? { kind: "tombstone", entry } : { kind: "live", record: byId };
+        }
         for (const entry of this.tombstones.values()) {
           if (entry.handle.toLowerCase() === wanted || entry.alias?.toLowerCase() === wanted || entry.id === name) {
             return { kind: "tombstone", entry };
@@ -5337,6 +5457,7 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
           this.dequeue((q) => q.id === id);
           record2.status = "stopped";
           record2.completedAt = Date.now();
+          this.persistSettled(record2);
           return true;
         }
         if (record2.status !== "running") return false;
@@ -5347,6 +5468,7 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
         });
         record2.status = "stopped";
         record2.completedAt = Date.now();
+        this.persistSettled(record2);
         return true;
       }
       /**
@@ -5408,10 +5530,20 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
           if (!retention.removal || boundary) retention.removal = { boundary, skipUnconsumed };
           return;
         }
+        this.persistSettled(record2);
         if (!boundary) this.tombstone(record2);
         const session = record2.session;
         record2.session = void 0;
-        this.agents.delete(id);
+        if (boundary || !isTopLevelAgent(record2)) this.agents.delete(id);
+        record2.promise = void 0;
+        record2.abortController = void 0;
+        record2.startGate = void 0;
+        record2.pendingSteers = void 0;
+        try {
+          record2.outputCleanup?.();
+        } catch {
+        }
+        record2.outputCleanup = void 0;
         this.startups.delete(id);
         const shutdown = shutdownChildSession(session).finally(() => {
           this.closing.delete(id);
@@ -5435,22 +5567,38 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
           sessionFile: record2.sessionFile,
           completedAt: record2.completedAt ?? Date.now(),
           resumeState: record2.resumeState,
-          status: record2.status
+          status: record2.status,
+          history: {
+            startedAt: record2.startedAt,
+            completedAt: record2.completedAt,
+            status: record2.status,
+            result: record2.result,
+            error: record2.error,
+            toolUses: record2.toolUses,
+            lifetimeUsage: record2.lifetimeUsage,
+            compactionCount: record2.compactionCount,
+            resultConsumed: record2.resultConsumed,
+            isBackground: record2.isBackground,
+            invocation: record2.invocation,
+            worktreeResult: record2.worktreeResult,
+            outputFile: record2.outputFile
+          }
         });
       }
       cleanup() {
         const cutoff = Date.now() - 10 * 6e4;
         for (const [id, record2] of this.agents) {
           if (record2.status === "running" || record2.status === "queued") continue;
-          if (!record2.resultConsumed || this.inFlight.has(id) || (record2.completedAt ?? 0) >= cutoff) continue;
-          this.removeRecord(id, record2);
+          if (!isTopLevelAgent(record2) && !record2.resultConsumed || this.inFlight.has(id) || (record2.completedAt ?? 0) >= cutoff) continue;
+          if (isTopLevelAgent(record2) && !record2.session && !record2.promise && !record2.abortController && !record2.startGate && !record2.outputCleanup) continue;
+          this.removeRecord(id, record2, false, false);
         }
       }
       /**
        * Remove all completed/stopped/errored records immediately.
        * Called on session start/switch so tasks from a prior session don't persist.
        * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
-       * (resultConsumed=false) — timed cleanup preserves those records too.
+       * (resultConsumed=false). Timed cleanup independently releases terminal SDK sessions.
        */
       clearCompleted(skipUnconsumed = false) {
         for (const [id, record2] of this.agents) {
@@ -6441,12 +6589,12 @@ var init_conversation_viewer = __esm({
 
 // src/index.ts
 init_agent_color();
-import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync11, unlinkSync as unlinkSync7, writeFileSync as writeFileSync6 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync11, unlinkSync as unlinkSync6, writeFileSync as writeFileSync5 } from "node:fs";
 import { isAbsolute as isAbsolute6, join as join15 } from "node:path";
 import { StringEnum as StringEnum2 } from "@earendil-works/pi-ai";
 import { defineTool as defineTool3, getAgentDir as getAgentDir10, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container as Container3, Key as Key2, matchesKey as matchesKey9, SettingsList, Spacer, Text as Text6 } from "@earendil-works/pi-tui";
-import { Type as Type8 } from "@sinclair/typebox";
+import { Type as Type7 } from "@sinclair/typebox";
 
 // src/agent-file-toggle.ts
 init_custom_agents();
@@ -6553,9 +6701,6 @@ function serializeAgentFile(cfg) {
   if (cfg.model) fmFields.push(`model: ${cfg.model}`);
   if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
   if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
-  if (cfg.allowedSubagents !== void 0) {
-    fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
-  }
   fmFields.push(`prompt_mode: ${cfg.promptMode}`);
   if (cfg.extensions === false) fmFields.push("extensions: false");
   else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
@@ -6823,8 +6968,7 @@ function isTerminalStatus(status) {
 __name(isTerminalStatus, "isTerminalStatus");
 var JOB_ID_PREFIX = {
   shell: "b",
-  monitor: "m",
-  agent: "a"
+  monitor: "m"
 };
 var EVENT = {
   stall: "bg-stall",
@@ -7298,13 +7442,6 @@ function completionSummary(job, status) {
     if (s === "killed") return `Monitor "${desc}" stopped`;
     if (s === "failed") return `Monitor "${desc}" script failed (exit ${job.exitCode ?? "unknown"})`;
     return `Monitor "${desc}" stream ended`;
-  }
-  if (job.kind === "agent") {
-    if (s === "killed") return `Agent "${desc}" was stopped`;
-    if (s === "failed") {
-      return `Agent "${desc}" failed: ${job.exitCode !== void 0 ? `exit code ${job.exitCode}` : "unknown error"}`;
-    }
-    return `Agent "${desc}" completed`;
   }
   if (s === "killed") return `Background command "${desc}" was stopped`;
   if (s === "failed") return `Background command "${desc}" failed with exit code ${job.exitCode ?? "unknown"}`;
@@ -8110,169 +8247,8 @@ var BackgroundRegistry = class {
   lastSidebarContent = void 0;
 };
 
-// src/jobs/patty/tools/agent-bg.ts
-import { execSync } from "node:child_process";
-import { closeSync as closeSync5, constants as constants2, openSync as openSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync3 } from "node:fs";
-import { Type as Type3 } from "@earendil-works/pi-ai";
-var cachedPiBinary;
-function resolvePiBinary() {
-  if (cachedPiBinary !== void 0) return cachedPiBinary;
-  try {
-    cachedPiBinary = execSync("which pi", { encoding: "utf-8", timeout: 3e3 }).trim();
-  } catch {
-    cachedPiBinary = "pi";
-  }
-  return cachedPiBinary;
-}
-__name(resolvePiBinary, "resolvePiBinary");
-function isMessageEntry(entry) {
-  return entry.type === "message" && "message" in entry;
-}
-__name(isMessageEntry, "isMessageEntry");
-function extractText2(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.filter((b) => typeof b === "object" && b !== null && b.type === "text" && typeof b.text === "string").map((b) => b.text).join("\n");
-}
-__name(extractText2, "extractText");
-function lastAssistantText(entries) {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    if (isMessageEntry(e) && e.message.role === "assistant") {
-      return extractText2(e.message.content).slice(-2e3);
-    }
-  }
-  return "";
-}
-__name(lastAssistantText, "lastAssistantText");
-function firstUserPrompt(entries) {
-  for (const e of entries) {
-    if (isMessageEntry(e) && e.message.role === "user") {
-      return extractText2(e.message.content).slice(0, 2e3);
-    }
-  }
-  return "";
-}
-__name(firstUserPrompt, "firstUserPrompt");
-function registerAgentBgTool(pi, reg) {
-  pi.registerTool({
-    name: "agent_bg",
-    label: "Background Agent",
-    description: "Run a separate pi -p process in the background with continuity context.",
-    promptSnippet: "Delegate work to a background pi -p process",
-    promptGuidelines: [
-      "Use agent_bg for work that can run independently from the current session.",
-      "Completion is reported with a background-job notification."
-    ],
-    parameters: Type3.Object({
-      prompt: Type3.String({ description: "Task to send to the background agent" }),
-      cwd: Type3.Optional(Type3.String({ description: "Working directory (default: current)" }))
-    }),
-    async execute(toolCallId, params, _signal, onUpdate, ctx) {
-      const p = params;
-      if (isBlankCommand(p.prompt)) throw new Error("Prompt is empty.");
-      const cwd = p.cwd ?? ctx.cwd;
-      requireExistingCwd(cwd);
-      assertJobSlot(reg);
-      const id = newJobId("agent", reg);
-      const logPath = logPathFor(id);
-      const promptLabel = p.prompt.slice(0, 100) + (p.prompt.length > 100 ? "\u2026" : "");
-      const entries = ctx.sessionManager.getEntries();
-      const summary = lastAssistantText(entries);
-      const originalPrompt = firstUserPrompt(entries);
-      const promptContent = [
-        "You are continuing a task that was backgrounded.",
-        "",
-        "## Original task",
-        p.prompt,
-        ...originalPrompt ? ["", "## Previous user context", originalPrompt] : [],
-        ...summary ? ["", "## Where you left off", summary] : [],
-        "",
-        "Continue from where you left off."
-      ].join("\n");
-      const promptFile = `${LOG_DIR}/prompt-${id}.md`;
-      const promptFd = openSync5(
-        promptFile,
-        constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | constants2.O_NOFOLLOW,
-        384
-      );
-      try {
-        writeFileSync3(promptFd, promptContent);
-      } catch (error) {
-        try {
-          unlinkSync4(promptFile);
-        } catch {
-        }
-        throw error;
-      } finally {
-        closeSync5(promptFd);
-      }
-      const model = ctx.model;
-      const modelArg = model ? `${model.provider}/${model.id}` : void 0;
-      const piBin = resolvePiBinary();
-      const spawnArgs = [
-        "-p",
-        "--mode",
-        "text",
-        ...modelArg ? ["--model", modelArg] : [],
-        `@${promptFile}`
-      ];
-      let spawned;
-      try {
-        spawned = spawnWithFileOutput({
-          file: piBin,
-          fileArgs: spawnArgs,
-          cwd,
-          logPath
-        });
-      } catch (err) {
-        try {
-          unlinkSync4(promptFile);
-        } catch {
-        }
-        throw err;
-      }
-      const job = createRunningJob({
-        id,
-        name: promptLabel,
-        command: `pi -p (background agent)`,
-        pid: spawned.pid,
-        identity: spawned.identity,
-        logPath,
-        toolCallId,
-        kind: "agent",
-        cwd
-      });
-      add(reg, job);
-      const progressPoller = streamLog(logPath, onUpdate);
-      const jobAc = startBackgroundJob({
-        reg,
-        pi,
-        ctx,
-        job,
-        exit: spawned.exit,
-        onCleanup: /* @__PURE__ */ __name(() => {
-          try {
-            unlinkSync4(promptFile);
-          } catch {
-          }
-        }, "onCleanup")
-      });
-      jobAc.signal.addEventListener("abort", () => progressPoller.stop(), { once: true });
-      return {
-        content: [textBlock(
-          `Agent running in background with ID: ${id}. Output is being written to: ${logPath}
-Prompt: ${promptLabel}`
-        )],
-        details: void 0
-      };
-    }
-  });
-}
-__name(registerAgentBgTool, "registerAgentBgTool");
-
 // src/jobs/patty/tools/bash.ts
-import { statSync as statSync5, unlinkSync as unlinkSync5 } from "node:fs";
+import { statSync as statSync5, unlinkSync as unlinkSync4 } from "node:fs";
 
 // src/jobs/patty/hint.ts
 var HINT_KEY = "bg-hint";
@@ -8304,19 +8280,19 @@ function clearBackgroundHint(ctx, render = true) {
 __name(clearBackgroundHint, "clearBackgroundHint");
 
 // src/jobs/patty/tools/bash-params.ts
-import { Type as Type4 } from "@earendil-works/pi-ai";
-var bashParamSchema = Type4.Object({
-  command: Type4.String({ description: "Shell command to run" }),
-  timeout: Type4.Optional(
-    Type4.Number({ description: "Timeout in seconds (default: 120)" })
+import { Type as Type3 } from "@earendil-works/pi-ai";
+var bashParamSchema = Type3.Object({
+  command: Type3.String({ description: "Shell command to run" }),
+  timeout: Type3.Optional(
+    Type3.Number({ description: "Timeout in seconds (default: 120)" })
   ),
-  run_in_background: Type4.Optional(
-    Type4.Boolean({
+  run_in_background: Type3.Optional(
+    Type3.Boolean({
       description: "Set to true to run this command in the background immediately. Output is saved to a private temporary log path returned by the tool."
     })
   ),
-  description: Type4.Optional(
-    Type4.String({ description: "Short description of what this command does" })
+  description: Type3.Optional(
+    Type3.String({ description: "Short description of what this command does" })
   )
 });
 
@@ -8507,7 +8483,7 @@ ${output}` : ""}`);
     if (!handedToBackground && !reg.retainResults) {
       reg.jobs.delete(id);
       try {
-        unlinkSync5(logPath);
+        unlinkSync4(logPath);
       } catch {
       }
     } else if (!handedToBackground && !isTerminalStatus(job.status) && isActive()) {
@@ -8550,7 +8526,7 @@ __name(spawnBackground, "spawnBackground");
 
 // src/jobs/patty/tools/bash-bg.ts
 import { appendFileSync as appendFileSync2 } from "node:fs";
-import { Type as Type5 } from "@earendil-works/pi-ai";
+import { Type as Type4 } from "@earendil-works/pi-ai";
 function registerBashBgTool(pi, reg) {
   pi.registerTool({
     name: "bash_bg",
@@ -8563,11 +8539,11 @@ function registerBashBgTool(pi, reg) {
       "For waits, prefer jobs action='attach' or a condition-based monitor when those express the real completion condition; explicit finite sleep commands remain allowed.",
       "Give the job a name when it will be easier to track in jobs list."
     ],
-    parameters: Type5.Object({
-      command: Type5.String({ description: "Command to run" }),
-      name: Type5.Optional(Type5.String({ description: "Label shown in jobs list" })),
-      timeout: Type5.Optional(Type5.Number({ description: "Timeout in seconds" })),
-      notify: Type5.Optional(Type5.Boolean({ description: "Notify on completion (default: true)" }))
+    parameters: Type4.Object({
+      command: Type4.String({ description: "Command to run" }),
+      name: Type4.Optional(Type4.String({ description: "Label shown in jobs list" })),
+      timeout: Type4.Optional(Type4.Number({ description: "Timeout in seconds" })),
+      notify: Type4.Optional(Type4.Boolean({ description: "Notify on completion (default: true)" }))
     }),
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
       const p = params;
@@ -8625,7 +8601,7 @@ function registerBashBgTool(pi, reg) {
 __name(registerBashBgTool, "registerBashBgTool");
 
 // src/jobs/patty/tools/jobs.ts
-import { StringEnum, Type as Type6 } from "@earendil-works/pi-ai";
+import { StringEnum, Type as Type5 } from "@earendil-works/pi-ai";
 
 // src/jobs/patty/log-search.ts
 import { createReadStream } from "node:fs";
@@ -8714,7 +8690,7 @@ function registerJobsTool(pi, reg) {
       "stats: show aggregate metrics",
       "Completion notices are informational \u2014 call 'output' on a FAILED job, or on any job whose output is the deliverable (e.g. a test/build you must report). Don't call it just to acknowledge a completed job."
     ],
-    parameters: Type6.Object({
+    parameters: Type5.Object({
       action: StringEnum(
         [
           "list",
@@ -8727,12 +8703,12 @@ function registerJobsTool(pi, reg) {
         ],
         { description: "Action to perform" }
       ),
-      jobId: Type6.Optional(Type6.String({ description: "Job ID" })),
-      pattern: Type6.Optional(
-        Type6.String({ description: "Regex pattern for search" })
+      jobId: Type5.Optional(Type5.String({ description: "Job ID" })),
+      pattern: Type5.Optional(
+        Type5.String({ description: "Regex pattern for search" })
       ),
-      wait: Type6.Optional(
-        Type6.Boolean({
+      wait: Type5.Optional(
+        Type5.Boolean({
           description: "Whether attach should wait for completion (default: true)"
         })
       )
@@ -8966,14 +8942,14 @@ function statsAction(reg) {
 __name(statsAction, "statsAction");
 
 // src/jobs/patty/tools/monitor.ts
-import { Type as Type7 } from "@earendil-works/pi-ai";
+import { Type as Type6 } from "@earendil-works/pi-ai";
 
 // src/jobs/patty/monitor-follow.ts
-import { closeSync as closeSync7, openSync as openSync7, readSync as readSync3, statSync as statSync6 } from "node:fs";
+import { closeSync as closeSync6, openSync as openSync6, readSync as readSync3, statSync as statSync6 } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 
 // src/jobs/patty/monitor-capture.ts
-import { closeSync as closeSync6, constants as constants3, ftruncateSync, mkdirSync as mkdirSync5, openSync as openSync6, writeSync } from "node:fs";
+import { closeSync as closeSync5, constants as constants2, ftruncateSync, mkdirSync as mkdirSync5, openSync as openSync5, writeSync } from "node:fs";
 import { dirname as dirname5 } from "node:path";
 var MONITOR_LOG_BYTES = 1024 * 1024;
 var MONITOR_CHUNK_BYTES = 64 * 1024;
@@ -8982,7 +8958,7 @@ var epochs = /* @__PURE__ */ new Map();
 var monitorCaptureEpoch = /* @__PURE__ */ __name((path) => epochs.get(path), "monitorCaptureEpoch");
 function openMonitorCapture(path) {
   mkdirSync5(dirname5(path), { recursive: true, mode: 448 });
-  const fd = openSync6(path, constants3.O_WRONLY | constants3.O_CREAT | constants3.O_EXCL | constants3.O_NOFOLLOW, 384);
+  const fd = openSync5(path, constants2.O_WRONLY | constants2.O_CREAT | constants2.O_EXCL | constants2.O_NOFOLLOW, 384);
   const epoch = { generation: 0 };
   epochs.set(path, epoch);
   let size = 0;
@@ -9006,7 +8982,7 @@ function openMonitorCapture(path) {
       if (closed) return;
       closed = true;
       if (epochs.get(path) === epoch) epochs.delete(path);
-      closeSync6(fd);
+      closeSync5(fd);
     }
   };
 }
@@ -9074,7 +9050,7 @@ function followLines(logPath, onLines, intervalMs = MONITOR_POLL_MS, onError = (
         deliver(["[monitor retained output rotated; older events may be omitted]"]);
       }
       if (size <= offset) return false;
-      fd = openSync7(logPath, "r");
+      fd = openSync6(logPath, "r");
       const n = readSync3(fd, buffer, 0, Math.min(size - offset, buffer.length), offset);
       offset += n;
       consume(decoder.write(buffer.subarray(0, n)));
@@ -9085,7 +9061,7 @@ function followLines(logPath, onLines, intervalMs = MONITOR_POLL_MS, onError = (
     } finally {
       if (fd !== void 0) {
         try {
-          closeSync7(fd);
+          closeSync6(fd);
         } catch (error) {
           onError(error);
         }
@@ -9485,25 +9461,25 @@ function registerMonitorTool(pi, reg) {
       "Use persistent:true for session-length watches (PR monitoring, log tails); stop it with the jobs tool (action='kill').",
       "Use the ws source for a WebSocket feed instead of `command: 'websocat \u2026'` \u2014 each text frame becomes one event."
     ],
-    parameters: Type7.Object({
-      command: Type7.Optional(
-        Type7.String({ description: `${shell} script; each stdout line is an event. Mutually exclusive with ws.` })
+    parameters: Type6.Object({
+      command: Type6.Optional(
+        Type6.String({ description: `${shell} script; each stdout line is an event. Mutually exclusive with ws.` })
       ),
-      ws: Type7.Optional(
-        Type7.Object(
+      ws: Type6.Optional(
+        Type6.Object(
           {
-            url: Type7.String({ description: "WebSocket URL (ws:// or wss://)" }),
-            protocols: Type7.Optional(Type7.Array(Type7.String()))
+            url: Type6.String({ description: "WebSocket URL (ws:// or wss://)" }),
+            protocols: Type6.Optional(Type6.Array(Type6.String()))
           },
           { description: "WebSocket source; each text frame is an event. Mutually exclusive with command." }
         )
       ),
-      description: Type7.String({ description: "Specific description, shown on every notification." }),
-      persistent: Type7.Optional(
-        Type7.Boolean({ description: "Run for the whole session (no timeout). Stop via jobs action='kill'. Default false." })
+      description: Type6.String({ description: "Specific description, shown on every notification." }),
+      persistent: Type6.Optional(
+        Type6.Boolean({ description: "Run for the whole session (no timeout). Stop via jobs action='kill'. Default false." })
       ),
-      timeout_ms: Type7.Optional(
-        Type7.Number({ description: "Kill after this deadline (default 300000, max 3600000). Ignored when persistent." })
+      timeout_ms: Type6.Optional(
+        Type6.Number({ description: "Kill after this deadline (default 300000, max 3600000). Ignored when persistent." })
       )
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -9767,7 +9743,6 @@ var JobRuntime = class {
     registerBashBgTool(scopedPi, reg);
     registerJobsTool(scopedPi, reg);
     registerMonitorTool(scopedPi, reg);
-    if (!/^(1|true|yes)$/i.test(process.env.PI_PATTY_DISABLE_AGENT_BG ?? "")) registerAgentBgTool(scopedPi, reg);
     registerInputHandlers(scopedPi, reg);
     if (owner.agentId) pi.on("session_shutdown", async () => {
       stopSidebarTicker(reg);
@@ -9991,8 +9966,8 @@ __name(runMentionClone, "runMentionClone");
 // src/index.ts
 init_model_resolver();
 init_model_scope();
-init_nested_tools();
 init_output_file();
+init_recursion_policy();
 
 // src/schedule.ts
 init_agent_runner();
@@ -10287,7 +10262,7 @@ var SubagentScheduler = class _SubagentScheduler {
 };
 
 // src/schedule-store.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync7, renameSync as renameSync2, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync6, readFileSync as readFileSync7, renameSync as renameSync2, unlinkSync as unlinkSync5, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname6, join as join12 } from "node:path";
 var LOCK_RETRY_MS = 50;
 var LOCK_MAX_RETRIES = 100;
@@ -10303,14 +10278,14 @@ __name(isProcessRunning, "isProcessRunning");
 function acquireLock(lockPath) {
   for (let i = 0; i < LOCK_MAX_RETRIES; i++) {
     try {
-      writeFileSync4(lockPath, `${process.pid}`, { flag: "wx" });
+      writeFileSync3(lockPath, `${process.pid}`, { flag: "wx" });
       return;
     } catch (e) {
       if (e.code === "EEXIST") {
         try {
           const pid = parseInt(readFileSync7(lockPath, "utf-8"), 10);
           if (pid && !isProcessRunning(pid)) {
-            unlinkSync6(lockPath);
+            unlinkSync5(lockPath);
             continue;
           }
         } catch {
@@ -10328,7 +10303,7 @@ function acquireLock(lockPath) {
 __name(acquireLock, "acquireLock");
 function releaseLock(lockPath) {
   try {
-    unlinkSync6(lockPath);
+    unlinkSync5(lockPath);
   } catch {
   }
 }
@@ -10367,7 +10342,7 @@ var ScheduleStore = class {
   save() {
     const data = { version: 1, jobs: [...this.jobs.values()] };
     const tmp = this.filePath + ".tmp";
-    writeFileSync4(tmp, JSON.stringify(data, null, 2));
+    writeFileSync3(tmp, JSON.stringify(data, null, 2));
     renameSync2(tmp, this.filePath);
   }
   /** Acquire lock → reload → mutate → save → release. */
@@ -10420,7 +10395,7 @@ var ScheduleStore = class {
   deleteFileIfEmpty() {
     if (this.jobs.size === 0 && existsSync8(this.filePath)) {
       try {
-        unlinkSync6(this.filePath);
+        unlinkSync5(this.filePath);
       } catch {
       }
     }
@@ -10429,7 +10404,8 @@ var ScheduleStore = class {
 
 // src/settings.ts
 init_agent_types();
-import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync5 } from "node:fs";
+init_recursion_policy();
+import { existsSync as existsSync9, mkdirSync as mkdirSync7, readFileSync as readFileSync8, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname7, join as join13 } from "node:path";
 import { getAgentDir as getAgentDir8 } from "@earendil-works/pi-coding-agent";
 var VALID_JOIN_MODES = /* @__PURE__ */ new Set(["async", "group", "smart"]);
@@ -10440,7 +10416,6 @@ var VALID_AGENT_MENTION_MODES = /* @__PURE__ */ new Set(["model", "direct", "off
 var MAX_CONCURRENT_CEILING = 1024;
 var MAX_TURNS_CEILING = 1e4;
 var GRACE_TURNS_CEILING = 1e3;
-var SUBAGENT_DEPTH_CEILING = 16;
 function sanitize(raw) {
   if (!raw || typeof raw !== "object") return {};
   const r = raw;
@@ -10457,9 +10432,8 @@ function sanitize(raw) {
   if (Number.isInteger(r.graceTurns) && r.graceTurns >= 1 && r.graceTurns <= GRACE_TURNS_CEILING) {
     out.graceTurns = r.graceTurns;
   }
-  if (Number.isInteger(r.maxSubagentDepth) && r.maxSubagentDepth >= 0 && r.maxSubagentDepth <= SUBAGENT_DEPTH_CEILING) {
-    out.maxSubagentDepth = r.maxSubagentDepth;
-  }
+  if (isSubagentDepth(r.maxSubagentDepth)) out.maxSubagentDepth = r.maxSubagentDepth;
+  if (typeof r.nestedAgentsEnabled === "boolean") out.nestedAgentsEnabled = r.nestedAgentsEnabled;
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
     out.defaultJoinMode = r.defaultJoinMode;
   }
@@ -10551,7 +10525,7 @@ function saveSettings(s, cwd = process.cwd()) {
   const path = projectPath(cwd);
   try {
     mkdirSync7(dirname7(path), { recursive: true });
-    writeFileSync5(path, JSON.stringify(s, null, 2), "utf-8");
+    writeFileSync4(path, JSON.stringify(s, null, 2), "utf-8");
     return true;
   } catch {
     return false;
@@ -10566,6 +10540,7 @@ function applySettings(s, appliers) {
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
+  if (typeof s.nestedAgentsEnabled === "boolean") appliers.setNestedAgentsEnabled(s.nestedAgentsEnabled);
   if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.backgroundByDefault === "boolean") appliers.setBackgroundByDefault(s.backgroundByDefault);
@@ -12102,8 +12077,7 @@ var FleetList = class {
    * Sort explicitly by latest start/resume time, independent of completion state.
    */
   agentRecords() {
-    const now = Date.now();
-    return this.manager.listAgents().filter((a) => isTopLevelAgent(a) && (a.session || this.manager.hasJobRuntime && (a.status === "running" || a.status === "queued")) && (a.status === "running" || a.status === "queued" || a.id === this.viewingAgentId || a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)).sort((a, b) => b.startedAt - a.startedAt);
+    return this.manager.listAgents().filter((a) => isTopLevelAgent(a) && (a.session || this.manager.hasJobRuntime || a.status !== "running" && a.status !== "queued")).sort((a, b) => b.startedAt - a.startedAt);
   }
   /**
    * Wire workflow runs into the list.
@@ -12155,7 +12129,7 @@ var FleetList = class {
     }, "addJobs");
     if (!ignoreCollapse && this.collapsed.has("main")) return entries;
     entries.push(...this.workflows().map((workflow) => ({ kind: "workflow", workflow })));
-    const visible = this.jobs ? records.filter((record2) => record2.session || record2.status === "running" || record2.status === "queued" || jobs.some((job) => job.ownerAgentId === record2.id)) : this.agentRecords();
+    const visible = this.jobs ? records : this.agentRecords();
     const owners = visible.map((record2) => ({ kind: "agent", record: record2 }));
     for (const [id, metadata] of this.knownOwners) {
       if (!records.some((record2) => record2.id === id) && jobs.some((job) => job.ownerAgentId === id)) {
@@ -12427,7 +12401,7 @@ var FleetList = class {
     if (row.kind === "job") {
       const job = row.job;
       const colour = job.status === "failed" || job.status === "killed" ? "error" : job.status === "completed" ? "success" : "text";
-      const label = `${job.kind === "agent" ? "process" : job.kind === "monitor" ? "monitor" : job.shell ?? "shell"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
+      const label = `${job.kind === "monitor" ? "monitor" : job.shell ?? "shell"} ${safeLabel(job.name ?? job.command)} (${job.id})`;
       const status = `${job.status}${job.exitCode !== void 0 ? ` exit=${job.exitCode}` : ""} \xB7 ${formatFleetElapsed((job.endTime ?? Date.now()) - job.startTime)}`;
       return rightAlign(`${"  ".repeat(row.depth + 1)}${this.bullet(index, sel, theme)} ${label}`, theme.fg(colour, status), width);
     }
@@ -16483,6 +16457,7 @@ Use get_subagent_result for full output.`,
     if (reportUsage) pendingUsage.add(usage);
   });
   manager.setJobRuntime(jobRuntime);
+  const recursionPolicy = manager.recursionPolicy;
   const MANAGER_KEY = /* @__PURE__ */ Symbol.for("pi-subagents:manager");
   const spawnResolved = /* @__PURE__ */ __name((piRef, ctxRef, type, prompt, options) => {
     reloadCustomAgents();
@@ -16509,6 +16484,8 @@ Use get_subagent_result for full output.`,
     delete safeOptions.workflowId;
     delete safeOptions.depth;
     delete safeOptions.maxSubagentDepth;
+    delete safeOptions.nestedAgentsEnabled;
+    delete safeOptions.recursionPolicy;
     delete safeOptions.configCwd;
     delete safeOptions.rootSessionId;
     delete safeOptions.resumeSessionFile;
@@ -16570,6 +16547,8 @@ Use get_subagent_result for full output.`,
   }
   __name(startScheduler, "startScheduler");
   pi.on("session_start", async (_event, ctx) => {
+    recursionPolicy.reset();
+    recursionPolicy.configure(loadSettings(ctx.cwd));
     nativeViewPatch ??= installNativeSessionViewPatch();
     uiGeneration++;
     if (manager.hasSessionViews()) {
@@ -16600,7 +16579,7 @@ Use get_subagent_result for full output.`,
             const record2 = resolveAgentRef(id);
             if (!record2 || record2.parentAgentId) return false;
             if (record2.status === "running" || record2.status === "queued") return false;
-            record2.resultConsumed = true;
+            manager.consumeResult(record2.id);
             cancelNudge(record2.id);
             return true;
           }, "consumeResult")
@@ -17099,7 +17078,8 @@ Type: ${record2.type}
       setOutputTranscript: setOutputTranscriptDefault,
       setWorktreeIsolation: setWorktreeIsolationEnabled,
       setWorkflowsEnabled,
-      setMaxSubagentDepth,
+      setMaxSubagentDepth: /* @__PURE__ */ __name((n) => recursionPolicy.configure({ ...recursionPolicy.configured, maxSubagentDepth: n }), "setMaxSubagentDepth"),
+      setNestedAgentsEnabled: /* @__PURE__ */ __name((b) => recursionPolicy.configure({ ...recursionPolicy.configured, nestedAgentsEnabled: b }), "setNestedAgentsEnabled"),
       setFallbackSubagent,
       setReportUsage,
       setShowCost,
@@ -17109,8 +17089,8 @@ Type: ${record2.type}
     (event, payload) => pi.events.emit(event, payload)
   );
   const scheduleParamShape = {
-    schedule: Type8.Optional(
-      Type8.String({
+    schedule: Type7.Optional(
+      Type7.String({
         description: 'Opt-in only \u2014 fire later instead of now. Omit to run immediately (the default, almost always correct). Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.'
       })
     )
@@ -17227,54 +17207,54 @@ Terse command-style prompts produce shallow, generic work.
       "Parent supervision corrects direction, scope, or acceptance\u2014not recoverable detail mistakes. Leave edit-match, build, type, or test failures to the child when it is adapting; steer on evidence of drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. Silence or one error is not enough; state evidence and the desired boundary, not micromanaged steps.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done."
     ],
-    parameters: Type8.Object({
-      prompt: Type8.String({
+    parameters: Type7.Object({
+      prompt: Type7.String({
         description: "The task for the agent to perform."
       }),
-      description: Type8.String({
+      description: Type7.String({
         description: "A short (3-5 word) description of the task (shown in UI)."
       }),
-      name: Type8.Optional(
-        Type8.String({
+      name: Type7.Optional(
+        Type7.String({
           description: 'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.'
         })
       ),
-      subagent_type: Type8.String({
+      subagent_type: Type7.String({
         description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir10()}/agents/*.md (global) are also available.`
       }),
-      model: Type8.Optional(
-        Type8.String({
+      model: Type7.Optional(
+        Type7.String({
           description: `Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type's default.`
         })
       ),
-      thinking: Type8.Optional(
-        Type8.String({
+      thinking: Type7.Optional(
+        Type7.String({
           description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`
         })
       ),
-      max_turns: Type8.Optional(
-        Type8.Number({
+      max_turns: Type7.Optional(
+        Type7.Number({
           description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
           minimum: 1
         })
       ),
-      run_in_background: Type8.Optional(
-        Type8.Boolean({
+      run_in_background: Type7.Optional(
+        Type7.Boolean({
           description: "Defaults to true \u2014 the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline."
         })
       ),
-      resume: Type8.Optional(
-        Type8.String({
+      resume: Type7.Optional(
+        Type7.String({
           description: "Original agent ID to resume, including after Pi restarts into the same parent session when its child session was persisted. Keeps the original identity and saved conversation; subagent_type and model/isolation overrides are ignored. Missing or invalid saved state is an error, never a fresh spawn. Resumes detached by default; pass run_in_background: false to block. A running agent cannot be resumed \u2014 use steer_subagent instead."
         })
       ),
-      isolated: Type8.Optional(
-        Type8.Boolean({
+      isolated: Type7.Optional(
+        Type7.Boolean({
           description: "If true, agent gets no extension/MCP tools \u2014 only built-in tools."
         })
       ),
-      inherit_context: Type8.Optional(
-        Type8.Boolean({
+      inherit_context: Type7.Optional(
+        Type7.Boolean({
           description: "If true, fork parent conversation into the agent. Default: false (fresh context)."
         })
       ),
@@ -17778,30 +17758,30 @@ Do not duplicate this agent's work.`,
       "Prefer `pipeline` over `parallel` \u2014 a barrier costs wall-clock whenever the stages are unevenly sized.",
       "A workflow runs in the background and notifies you when it finishes \u2014 do not poll or sleep waiting for it."
     ],
-    parameters: Type8.Object({
-      script: Type8.Optional(
-        Type8.String({
+    parameters: Type7.Object({
+      script: Type7.Optional(
+        Type7.String({
           maxLength: 524288,
           description: "Inline workflow source. Must begin with `export const meta = { name, description }`."
         })
       ),
-      scriptPath: Type8.Optional(
-        Type8.String({
+      scriptPath: Type7.Optional(
+        Type7.String({
           description: "Path to a workflow script file, absolute or relative to the project. Takes precedence over `script` \u2014 this is how you re-run an edited workflow."
         })
       ),
-      name: Type8.Optional(
-        Type8.String({
+      name: Type7.Optional(
+        Type7.String({
           description: "Name of a saved workflow \u2014 `<name>.js` in .pi/workflows/, .agents/workflows/ or the user's agent dir. Lowest precedence: `scriptPath` and `script` both win over it."
         })
       ),
-      args: Type8.Optional(
-        Type8.Any({
+      args: Type7.Optional(
+        Type7.Any({
           description: "Exposed to the script as the global `args`, verbatim. Must be JSON-shaped."
         })
       ),
-      resumeFromRunId: Type8.Optional(
-        Type8.String({
+      resumeFromRunId: Type7.Optional(
+        Type7.String({
           pattern: "^wf_[a-z0-9-]{6,}$",
           description: "Run id of an earlier workflow in this session. Its unchanged leading agent() calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live. Same script and args means nothing re-runs."
         })
@@ -17810,11 +17790,11 @@ Do not duplicate this agent's work.`,
       // every other tool has them, and a hard schema rejection would cost a
       // whole turn to re-emit a script that was already correct. The `meta`
       // block is the one place a workflow is named.
-      title: Type8.Optional(
-        Type8.String({ description: "Ignored \u2014 set the workflow title in the script's `meta` block." })
+      title: Type7.Optional(
+        Type7.String({ description: "Ignored \u2014 set the workflow title in the script's `meta` block." })
       ),
-      description: Type8.Optional(
-        Type8.String({ description: "Ignored \u2014 set the workflow description in the script's `meta` block." })
+      description: Type7.Optional(
+        Type7.String({ description: "Ignored \u2014 set the workflow description in the script's `meta` block." })
       )
     }),
     renderCall(args, theme) {
@@ -17866,7 +17846,7 @@ Do not duplicate this agent's work.`,
       try {
         const dir = sessionTaskDir(ctx.cwd, ctx.sessionManager.getSessionId());
         savedPath = join15(dir, `${runId}.workflow.js`);
-        writeFileSync6(savedPath, resolved.script, "utf-8");
+        writeFileSync5(savedPath, resolved.script, "utf-8");
         journalPath = join15(dir, `${runId}.workflow.jsonl`);
       } catch (err) {
         savedPath = void 0;
@@ -17998,17 +17978,17 @@ To iterate, edit the script file and call SubagentWorkflow again with scriptPath
     label: "Get Agent Result",
     description: "Check status and retrieve a background agent's full result \u2014 its completion notification carries only a preview. Use the agent ID returned by Agent.",
     promptSnippet: "Check status and retrieve results from a background agent",
-    parameters: Type8.Object({
-      agent_id: Type8.String({
+    parameters: Type7.Object({
+      agent_id: Type7.String({
         description: "The agent ID to check. The agent's handle also works \u2014 its `name` if you gave it one, otherwise its type (`explore`, `explore-2`)."
       }),
-      wait: Type8.Optional(
-        Type8.Boolean({
+      wait: Type7.Optional(
+        Type7.Boolean({
           description: "If true, wait for the agent to complete before returning. Default: false."
         })
       ),
-      verbose: Type8.Optional(
-        Type8.Boolean({
+      verbose: Type7.Optional(
+        Type7.Boolean({
           description: "If true, include the agent's full conversation (messages + tool calls). Default: false."
         })
       )
@@ -18042,12 +18022,13 @@ Description: ${record2.description}
       } else if (record2.status === "error") {
         output += `Error: ${record2.error}${partialOutputSuffix(record2)}`;
       } else {
-        output += record2.result?.trim() || "No output.";
+        output += record2.result?.trim() || record2.error || "No output.";
       }
       if (record2.status !== "running" && record2.status !== "queued") {
-        record2.resultConsumed = true;
+        manager.consumeResult(record2.id);
         cancelNudge(record2.id);
       }
+      if (params.verbose && !record2.session) output += "\n\nConversation unavailable in memory; saved results remain readable. Explicit resume requires a valid saved checkpoint.";
       if (params.verbose && record2.session) {
         const conversation = getAgentConversation(record2.session);
         if (conversation) {
@@ -18069,16 +18050,16 @@ ${conversation}`;
       "Use get_subagent_activity only for explicit parent supervision. Treat excerpts as an observation opportunity, not a mandate to steer; compare them with the child\u2019s original scope, objective, and acceptance criteria.",
       "The child self-heals recoverable detail mistakes while adapting. Silence or one edit-match, build, type, or test error is not enough; steer for direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary, not micromanaged steps."
     ],
-    parameters: Type8.Object({
-      agent_id: Type8.String({
+    parameters: Type7.Object({
+      agent_id: Type7.String({
         description: "The top-level agent ID or handle to inspect."
       }),
-      limit: Type8.Optional(Type8.Integer({
+      limit: Type7.Optional(Type7.Integer({
         minimum: 1,
         maximum: MAX_ACTIVITY_LIMIT,
         description: `Maximum public activity events to return (default ${DEFAULT_ACTIVITY_LIMIT}, maximum ${MAX_ACTIVITY_LIMIT}).`
       })),
-      cursor: Type8.Optional(Type8.String({
+      cursor: Type7.Optional(Type7.String({
         maxLength: 2048,
         description: "Opaque cursor from a previous get_subagent_activity response. Omit for the current retained transcript."
       }))
@@ -18112,20 +18093,20 @@ ${formatActivityPage(page)}`);
       "Use get_subagent_activity_detail only after get_subagent_activity returned an activity ID and only for explicit parent supervision. It reads one bounded public message; it does not consume the child result or move a watch.",
       "Treat detail as an observation opportunity, not a mandate to steer. The parent corrects direction, scope, or acceptance; the child self-heals recoverable detail mistakes. Silence or one error is not enough; steer on evidence such as drift, repeated ineffective attempts without new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action, and state the desired boundary."
     ],
-    parameters: Type8.Object({
-      agent_id: Type8.String({
+    parameters: Type7.Object({
+      agent_id: Type7.String({
         description: "The top-level agent ID or handle that produced the activity ID."
       }),
-      activity_id: Type8.String({
+      activity_id: Type7.String({
         maxLength: 512,
         description: "Opaque activity ID returned by get_subagent_activity for this same agent session."
       }),
-      offset: Type8.Optional(Type8.Integer({
+      offset: Type7.Optional(Type7.Integer({
         minimum: 0,
         maximum: MAX_ACTIVITY_DETAIL_CHARS,
         description: `Character offset in this message's bounded public rendering (default 0; maximum ${MAX_ACTIVITY_DETAIL_CHARS}).`
       })),
-      limit: Type8.Optional(Type8.Integer({
+      limit: Type7.Optional(Type7.Integer({
         minimum: 1,
         maximum: MAX_ACTIVITY_DETAIL_LIMIT,
         description: `Characters to return (default ${DEFAULT_ACTIVITY_DETAIL_LIMIT}; maximum ${MAX_ACTIVITY_DETAIL_LIMIT}).`
@@ -18161,7 +18142,7 @@ ${formatActivityDetailPage(page)}`);
       "Use watch_subagent only for explicit opt-in parent supervision of a top-level background agent. A notification is an observation opportunity, not a mandate to steer: compare untrusted evidence with the child\u2019s original scope, objective, and acceptance criteria.",
       "Let the child self-heal recoverable edit-match, build, type, or test mistakes while adapting. Silence or one error is not enough; intervene for direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary rather than micromanaging steps."
     ],
-    parameters: Type8.Object({
+    parameters: Type7.Object({
       // pi-ai's StringEnum is required for Google-compatible enum schemas;
       // this extension still builds its surrounding Type.Object with the host's
       // legacy @sinclair TypeBox package, so bridge the structurally identical
@@ -18169,19 +18150,19 @@ ${formatActivityDetailPage(page)}`);
       action: StringEnum2(["start", "stop", "status"], {
         description: "start a watch, stop one, or return its current status."
       }),
-      agent_id: Type8.String({
+      agent_id: Type7.String({
         description: "The top-level background agent ID or handle to watch."
       }),
-      interval_seconds: Type8.Optional(Type8.Integer({
+      interval_seconds: Type7.Optional(Type7.Integer({
         minimum: MIN_WATCH_INTERVAL_SECONDS,
         maximum: MAX_WATCH_INTERVAL_SECONDS,
         description: `Periodic interval in seconds (default ${DEFAULT_WATCH_INTERVAL_SECONDS}; ${MIN_WATCH_INTERVAL_SECONDS}-${MAX_WATCH_INTERVAL_SECONDS}).`
       })),
-      review_brief: Type8.Optional(Type8.String({
+      review_brief: Type7.Optional(Type7.String({
         maxLength: 500,
         description: "Optional bounded review focus included with evidence notifications."
       })),
-      criteria: Type8.Optional(Type8.String({
+      criteria: Type7.Optional(Type7.String({
         maxLength: 500,
         description: "Optional bounded correction criteria included with evidence notifications."
       }))
@@ -18223,11 +18204,11 @@ ${formatActivityDetailPage(page)}`);
       "Direct user-requested steering is normal. For supervision corrections, steer only on evidence of direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action; silence or one recoverable error is not enough.",
       "Leave recoverable edit-match, build, type, and test failures to the child when it is adapting and self-healing. State the evidence and desired boundary, not a micromanaged sequence of steps."
     ],
-    parameters: Type8.Object({
-      agent_id: Type8.String({
+    parameters: Type7.Object({
+      agent_id: Type7.String({
         description: "The agent ID to steer (must be currently running). The agent's handle also works \u2014 its `name` if you gave it one, otherwise its type (`explore`, `explore-2`)."
       }),
-      message: Type8.String({
+      message: Type7.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation."
       })
     }),
@@ -18454,8 +18435,8 @@ Current state: ${stateParts.join(" \xB7 ")}`
       const content = readFileSync11(file.path, "utf-8");
       const edited = await ctx.ui.editor(`Edit ${name}`, content);
       if (edited !== void 0 && edited !== content) {
-        const { writeFileSync: writeFileSync7 } = await import("node:fs");
-        writeFileSync7(file.path, edited, "utf-8");
+        const { writeFileSync: writeFileSync6 } = await import("node:fs");
+        writeFileSync6(file.path, edited, "utf-8");
         reloadCustomAgents();
         ctx.ui.notify(`Updated ${file.path}`, "info");
       }
@@ -18463,7 +18444,7 @@ Current state: ${stateParts.join(" \xB7 ")}`
       if (file) {
         const confirmed = await ctx.ui.confirm("Delete agent", `Delete ${name} from ${file.location} (${file.path})?`);
         if (confirmed) {
-          unlinkSync7(file.path);
+          unlinkSync6(file.path);
           reloadCustomAgents();
           ctx.ui.notify(`Deleted ${file.path}`, "info");
         }
@@ -18471,7 +18452,7 @@ Current state: ${stateParts.join(" \xB7 ")}`
     } else if (choice === "Reset to default" && file) {
       const confirmed = await ctx.ui.confirm("Reset to default", `Delete override ${file.path} and restore embedded default?`);
       if (confirmed) {
-        unlinkSync7(file.path);
+        unlinkSync6(file.path);
         reloadCustomAgents();
         ctx.ui.notify(`Restored default ${name}`, "info");
       }
@@ -18498,8 +18479,8 @@ Current state: ${stateParts.join(" \xB7 ")}`
       if (!overwrite) return;
     }
     const content = serializeAgentFile(cfg);
-    const { writeFileSync: writeFileSync7 } = await import("node:fs");
-    writeFileSync7(targetPath, content, "utf-8");
+    const { writeFileSync: writeFileSync6 } = await import("node:fs");
+    writeFileSync6(targetPath, content, "utf-8");
     reloadCustomAgents();
     ctx.ui.notify(`Ejected ${name} to ${targetPath}`, "info");
   }
@@ -18517,8 +18498,8 @@ Current state: ${stateParts.join(" \xB7 ")}`
         ctx.ui.notify(`Cannot disable ${name}: ${file.path} has no frontmatter block.`, "error");
         return;
       }
-      const { writeFileSync: writeFileSync8 } = await import("node:fs");
-      writeFileSync8(file.path, updated, "utf-8");
+      const { writeFileSync: writeFileSync7 } = await import("node:fs");
+      writeFileSync7(file.path, updated, "utf-8");
       reloadCustomAgents();
       ctx.ui.notify(`Disabled ${name} (${file.path})`, "info");
       return;
@@ -18531,8 +18512,8 @@ Current state: ${stateParts.join(" \xB7 ")}`
     const targetDir = location.startsWith("Project") ? projectAgentsDir() : personalAgentsDir();
     mkdirSync8(targetDir, { recursive: true });
     const targetPath = join15(targetDir, `${name}.md`);
-    const { writeFileSync: writeFileSync7 } = await import("node:fs");
-    writeFileSync7(targetPath, "---\nenabled: false\n---\n", "utf-8");
+    const { writeFileSync: writeFileSync6 } = await import("node:fs");
+    writeFileSync6(targetPath, "---\nenabled: false\n---\n", "utf-8");
     reloadCustomAgents();
     ctx.ui.notify(`Disabled ${name} (${targetPath})`, "info");
   }
@@ -18546,13 +18527,13 @@ Current state: ${stateParts.join(" \xB7 ")}`
       ctx.ui.notify(`${name} is not disabled in ${file.path}.`, "info");
       return;
     }
-    const { writeFileSync: writeFileSync7 } = await import("node:fs");
+    const { writeFileSync: writeFileSync6 } = await import("node:fs");
     if (isEmptyStub(updated)) {
-      unlinkSync7(file.path);
+      unlinkSync6(file.path);
       reloadCustomAgents();
       ctx.ui.notify(`Enabled ${name} (removed ${file.path})`, "info");
     } else {
-      writeFileSync7(file.path, updated, "utf-8");
+      writeFileSync6(file.path, updated, "utf-8");
       reloadCustomAgents();
       ctx.ui.notify(`Enabled ${name} (${file.path})`, "info");
     }
@@ -18706,8 +18687,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
       if (!overwrite) return;
     }
-    const { writeFileSync: writeFileSync7 } = await import("node:fs");
-    writeFileSync7(targetPath, content, "utf-8");
+    const { writeFileSync: writeFileSync6 } = await import("node:fs");
+    writeFileSync6(targetPath, content, "utf-8");
     reloadCustomAgents();
     ctx.ui.notify(`Created ${targetPath}`, "info");
   }
@@ -18742,7 +18723,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // JSON.stringify, so unset stays unset — same reasoning as
       // `fallbackSubagent` below.
       workflowsEnabled: isWorkflowsPinned() ? isWorkflowsEnabled() : void 0,
-      maxSubagentDepth: getMaxSubagentDepth(),
+      ...recursionPolicy.configured,
       // Deliberately NOT `?? "general-purpose"`: every settings change writes the
       // whole snapshot, and materializing the implicit default would turn it into
       // explicit configuration — which then fails loudly if general-purpose later
@@ -18770,7 +18751,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const mcf = manager.getMaxConcurrentForeground();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
-      const msd = getMaxSubagentDepth();
+      const msd = recursionPolicy.configured.maxSubagentDepth;
       const fallbackValue = getFallbackSubagent() ?? "general-purpose";
       const fallbackValues = [.../* @__PURE__ */ new Set([...getAvailableTypes(), NO_FALLBACK])];
       return [
@@ -18801,6 +18782,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)]
+        },
+        {
+          id: "nestedAgentsEnabled",
+          label: "Nested agents",
+          description: "Persistent recursion baseline (session /subagent-recursion overrides are separate)",
+          currentValue: recursionPolicy.configured.nestedAgentsEnabled ? "on" : "off",
+          values: ["on", "off"]
         },
         {
           id: "maxSubagentDepth",
@@ -18973,14 +18961,16 @@ Write the file using the write tool. Only write the file, nothing else.`;
           setGraceTurns(n);
           notifyApplied(ctx, `Grace turns set to ${n}`);
         }
+      } else if (id === "nestedAgentsEnabled") {
+        recursionPolicy.configure({ ...recursionPolicy.configured, nestedAgentsEnabled: value === "on" });
+        notifyApplied(ctx, `Nested agents baseline ${value}; session overrides unchanged.`);
       } else if (id === "maxSubagentDepth") {
-        const n = parseInt(value, 10);
-        if (n >= 0) {
-          setMaxSubagentDepth(n);
-          notifyApplied(
-            ctx,
-            n <= 1 ? "Nested delegation disabled" : `Nested depth set to ${n}. Applies to agents started from now on.`
-          );
+        const n = Number(value);
+        if (isSubagentDepth(n)) {
+          recursionPolicy.configure({ ...recursionPolicy.configured, maxSubagentDepth: n });
+          notifyApplied(ctx, `Nested depth baseline set to ${n}; session overrides unchanged.`);
+        } else {
+          ctx.ui.notify("Nested depth must be an integer from 0 to 16.", "warning");
         }
       } else if (id === "joinMode") {
         setDefaultJoinMode(value);
@@ -19121,7 +19111,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       };
     });
     if (result && NUMERIC_IDS.has(result)) {
-      const current = result === "maxConcurrent" ? String(manager.getMaxConcurrent()) : result === "maxConcurrentForeground" ? String(manager.getMaxConcurrentForeground()) : result === "defaultMaxTurns" ? String(getDefaultMaxTurns() ?? 0) : result === "maxSubagentDepth" ? String(getMaxSubagentDepth()) : String(getGraceTurns());
+      const current = result === "maxConcurrent" ? String(manager.getMaxConcurrent()) : result === "maxConcurrentForeground" ? String(manager.getMaxConcurrentForeground()) : result === "defaultMaxTurns" ? String(getDefaultMaxTurns() ?? 0) : result === "maxSubagentDepth" ? String(recursionPolicy.configured.maxSubagentDepth) : String(getGraceTurns());
       const label = result === "maxConcurrent" ? "Max concurrency (1+)" : result === "maxConcurrentForeground" ? "Max foreground concurrency (0 = unlimited)" : result === "defaultMaxTurns" ? "Default max turns (0 = unlimited)" : result === "maxSubagentDepth" ? "Nested depth (0/1 = nesting off)" : "Grace turns (1+)";
       let input = await ctx.ui.input(label, current);
       while (input != null) {
@@ -19156,17 +19146,38 @@ Write the file using the write tool. Only write the file, nothing else.`;
     SUBAGENT_TOOL_NAMES.STEER,
     "bash_bg",
     "jobs",
-    "monitor",
-    "agent_bg"
+    "monitor"
   ];
   let subagentToolsEnabled = false;
   function setSubagentToolsActive(enabled) {
-    const available = new Set(pi.getAllTools().map((tool) => tool.name));
+    let available;
+    let current;
+    try {
+      available = new Set(pi.getAllTools().map((tool) => tool.name));
+      current = pi.getActiveTools();
+    } catch {
+      return;
+    }
     const names = manualSubagentTools.filter((name) => available.has(name) && (name !== SUBAGENT_TOOL_NAMES.WORKFLOW || isWorkflowsEnabled()));
-    const active2 = pi.getActiveTools().filter((name) => !names.includes(name));
-    pi.setActiveTools(enabled ? [...active2, ...names] : active2);
+    const active2 = current.filter((name) => !names.includes(name));
+    const next = enabled ? [...active2, ...names] : active2;
+    if (next.length !== current.length || next.some((name, i) => name !== current[i])) pi.setActiveTools(next);
   }
   __name(setSubagentToolsActive, "setSubagentToolsActive");
+  pi.registerCommand("subagent-recursion", {
+    description: "Session-only nested delegation: on|off|depth N|status|reset",
+    getArgumentCompletions: /* @__PURE__ */ __name((argumentPrefix) => {
+      const prefix = argumentPrefix.trimStart().toLowerCase();
+      const candidates = /^depth\s/.test(prefix) ? Array.from({ length: 17 }, (_, depth) => `depth ${depth}`) : ["on", "off", "depth", "status", "reset"];
+      const matches = candidates.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
+      return matches.length ? matches : null;
+    }, "getArgumentCompletions"),
+    handler: /* @__PURE__ */ __name(async (args, ctx) => {
+      if (args.trim().toLowerCase() === "reset") recursionPolicy.configure(loadSettings(ctx.cwd));
+      const { message, level } = recursionPolicy.command(args);
+      ctx.ui.notify(message, level);
+    }, "handler")
+  });
   pi.registerCommand("subagent-tools", {
     description: "Enable or disable subagent model tools for this session: /subagent-tools on|off",
     handler: /* @__PURE__ */ __name(async (args, ctx) => {

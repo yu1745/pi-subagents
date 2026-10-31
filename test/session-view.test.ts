@@ -104,7 +104,8 @@ describe("native session view leases", () => {
     second.release();
     await flushViews();
     expect(manager.hasSessionViews()).toBe(false);
-    expect(manager.getRecord(record.id)).toBeUndefined();
+    expect(manager.getRecord(record.id)).toBe(record);
+    expect(record.result).toBe("done");
     expect(record.session).toBeUndefined();
     expect(session.dispose).toHaveBeenCalledOnce();
     expect(manager.resolveMention(record.handle!)?.kind).toBe("tombstone");

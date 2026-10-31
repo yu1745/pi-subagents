@@ -31,8 +31,8 @@ import { describeMention, handleBase, isReservedHandle, parseMention, resolveHan
 import { runMentionClone } from "./mention-clone.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
-import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { isSubagentDepth } from "./recursion-policy.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -653,6 +653,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   manager.setJobRuntime(jobRuntime);
+  const recursionPolicy = manager.recursionPolicy;
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
@@ -721,6 +722,8 @@ export default function (pi: ExtensionAPI) {
     delete safeOptions.workflowId;
     delete safeOptions.depth;
     delete safeOptions.maxSubagentDepth;
+    delete safeOptions.nestedAgentsEnabled;
+    delete safeOptions.recursionPolicy;
     delete safeOptions.configCwd;
     // Also internal: it names a transcript directory, so a forged value would
     // be a path-traversal primitive.
@@ -831,6 +834,8 @@ export default function (pi: ExtensionAPI) {
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
+    recursionPolicy.reset();
+    recursionPolicy.configure(loadSettings(ctx.cwd));
     nativeViewPatch ??= installNativeSessionViewPatch();
     uiGeneration++;
     if (manager.hasSessionViews()) {
@@ -866,7 +871,7 @@ export default function (pi: ExtensionAPI) {
             // signal that it finished.
             if (!record || record.parentAgentId) return false;
             if (record.status === "running" || record.status === "queued") return false;
-            record.resultConsumed = true;
+            manager.consumeResult(record.id);
             cancelNudge(record.id);
             return true;
           },
@@ -1594,7 +1599,8 @@ export default function (pi: ExtensionAPI) {
       setOutputTranscript: setOutputTranscriptDefault,
       setWorktreeIsolation: setWorktreeIsolationEnabled,
       setWorkflowsEnabled: setWorkflowsEnabled,
-      setMaxSubagentDepth: setMaxSubagentDepth,
+      setMaxSubagentDepth: n => recursionPolicy.configure({ ...recursionPolicy.configured, maxSubagentDepth: n }),
+      setNestedAgentsEnabled: b => recursionPolicy.configure({ ...recursionPolicy.configured, nestedAgentsEnabled: b }),
       setFallbackSubagent: setFallbackSubagent,
       setReportUsage,
       setShowCost,
@@ -2902,16 +2908,17 @@ Terse command-style prompts produce shallow, generic work.
       } else if (record.status === "error") {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
       } else {
-        output += record.result?.trim() || "No output.";
+        output += record.result?.trim() || record.error || "No output.";
       }
 
       // Mark result as consumed — suppresses the completion notification
       if (record.status !== "running" && record.status !== "queued") {
-        record.resultConsumed = true;
+        manager.consumeResult(record.id);
         cancelNudge(record.id);
       }
 
-      // Verbose: include full conversation
+      // Verbose: include full conversation only while its SDK session is retained.
+      if (params.verbose && !record.session) output += "\n\nConversation unavailable in memory; saved results remain readable. Explicit resume requires a valid saved checkpoint.";
       if (params.verbose && record.session) {
         const conversation = getAgentConversation(record.session);
         if (conversation) {
@@ -3744,7 +3751,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // JSON.stringify, so unset stays unset — same reasoning as
       // `fallbackSubagent` below.
       workflowsEnabled: isWorkflowsPinned() ? isWorkflowsEnabled() : undefined,
-      maxSubagentDepth: getMaxSubagentDepth(),
+      ...recursionPolicy.configured,
       // Deliberately NOT `?? "general-purpose"`: every settings change writes the
       // whole snapshot, and materializing the implicit default would turn it into
       // explicit configuration — which then fails loudly if general-purpose later
@@ -3778,7 +3785,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const mcf = manager.getMaxConcurrentForeground();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
-      const msd = getMaxSubagentDepth();
+      const msd = recursionPolicy.configured.maxSubagentDepth;
       // Label what unset actually does — it targets general-purpose even when
       // that is unregistered (the permissive hardcoded tier), so showing "none"
       // there would advertise strict dispatch for the most permissive state.
@@ -3815,6 +3822,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
+        },
+        {
+          id: "nestedAgentsEnabled",
+          label: "Nested agents",
+          description: "Persistent recursion baseline (session /subagent-recursion overrides are separate)",
+          currentValue: recursionPolicy.configured.nestedAgentsEnabled ? "on" : "off",
+          values: ["on", "off"],
         },
         {
           id: "maxSubagentDepth",
@@ -3997,16 +4011,16 @@ Write the file using the write tool. Only write the file, nothing else.`;
           setGraceTurns(n);
           notifyApplied(ctx, `Grace turns set to ${n}`);
         }
+      } else if (id === "nestedAgentsEnabled") {
+        recursionPolicy.configure({ ...recursionPolicy.configured, nestedAgentsEnabled: value === "on" });
+        notifyApplied(ctx, `Nested agents baseline ${value}; session overrides unchanged.`);
       } else if (id === "maxSubagentDepth") {
-        const n = parseInt(value, 10);
-        if (n >= 0) {
-          setMaxSubagentDepth(n);
-          notifyApplied(
-            ctx,
-            n <= 1
-              ? "Nested delegation disabled"
-              : `Nested depth set to ${n}. Applies to agents started from now on.`,
-          );
+        const n = Number(value);
+        if (isSubagentDepth(n)) {
+          recursionPolicy.configure({ ...recursionPolicy.configured, maxSubagentDepth: n });
+          notifyApplied(ctx, `Nested depth baseline set to ${n}; session overrides unchanged.`);
+        } else {
+          ctx.ui.notify("Nested depth must be an integer from 0 to 16.", "warning");
         }
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
@@ -4180,7 +4194,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           : result === "defaultMaxTurns"
             ? String(getDefaultMaxTurns() ?? 0)
             : result === "maxSubagentDepth"
-              ? String(getMaxSubagentDepth())
+              ? String(recursionPolicy.configured.maxSubagentDepth)
               : String(getGraceTurns());
 
       const label = result === "maxConcurrent"
@@ -4234,15 +4248,39 @@ Write the file using the write tool. Only write the file, nothing else.`;
     "bash_bg",
     "jobs",
     "monitor",
-    "agent_bg",
   ];
   let subagentToolsEnabled = false;
   function setSubagentToolsActive(enabled: boolean): void {
-    const available = new Set(pi.getAllTools().map(tool => tool.name));
+    // Some headless hosts do not expose tool listing until their runtime binds.
+    // Match workflow collision handling: visibility cannot fail session startup.
+    let available: Set<string>;
+    let current: string[];
+    try {
+      available = new Set(pi.getAllTools().map(tool => tool.name));
+      current = pi.getActiveTools();
+    } catch { return; }
     const names = manualSubagentTools.filter(name => available.has(name) && (name !== SUBAGENT_TOOL_NAMES.WORKFLOW || isWorkflowsEnabled()));
-    const active = pi.getActiveTools().filter(name => !names.includes(name));
-    pi.setActiveTools(enabled ? [...active, ...names] : active);
+    const active = current.filter(name => !names.includes(name));
+    const next = enabled ? [...active, ...names] : active;
+    if (next.length !== current.length || next.some((name, i) => name !== current[i])) pi.setActiveTools(next);
   }
+
+  pi.registerCommand("subagent-recursion", {
+    description: "Session-only nested delegation: on|off|depth N|status|reset",
+    getArgumentCompletions: argumentPrefix => {
+      const prefix = argumentPrefix.trimStart().toLowerCase();
+      const candidates = /^depth\s/.test(prefix)
+        ? Array.from({ length: 17 }, (_, depth) => `depth ${depth}`)
+        : ["on", "off", "depth", "status", "reset"];
+      const matches = candidates.filter(value => value.startsWith(prefix)).map(value => ({ value, label: value }));
+      return matches.length ? matches : null;
+    },
+    handler: async (args, ctx) => {
+      if (args.trim().toLowerCase() === "reset") recursionPolicy.configure(loadSettings(ctx.cwd));
+      const { message, level } = recursionPolicy.command(args);
+      ctx.ui.notify(message, level);
+    },
+  });
 
   pi.registerCommand("subagent-tools", {
     description: "Enable or disable subagent model tools for this session: /subagent-tools on|off",

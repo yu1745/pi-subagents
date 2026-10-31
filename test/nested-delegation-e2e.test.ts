@@ -70,10 +70,10 @@ function findOutputFiles(root: string): string[] {
 function writeAgents(cwd: string): void {
   const dir = join(cwd, ".pi", "agents");
   mkdirSync(dir, { recursive: true });
-  // Opts into nesting, restricted to one type — the allowlist path, not `all`.
+  writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ nestedAgentsEnabled: true }));
   writeFileSync(
     join(dir, "orchestrator.md"),
-    "---\ndescription: Delegating orchestrator\ntools: read\nextensions: false\nallowed_subagents: worker\n---\nDelegate to worker.\n",
+    "---\ndescription: Delegating orchestrator\ntools: read\nextensions: false\n---\nDelegate to worker.\n",
   );
   writeFileSync(
     join(dir, "worker.md"),
@@ -91,7 +91,7 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
     for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  it("a child with allowed_subagents spawns its own child, and the output travels back up", async () => {
+  it("a centrally enabled child spawns its own child, and the output travels back up", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "nested-e2e-"));
     tmpDirs.push(cwd);
     writeAgents(cwd);
@@ -103,7 +103,7 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
       const text = firstUserText(context);
       const names = (context.tools ?? []).map((t) => t.name);
 
-      // Leaf: no nested tools (it never opted in) — just answer.
+      // Leaf: no nested tools at depth 2 — just answer.
       if (text.includes("Do the leaf work")) {
         toolsSeen.set("worker", names);
         return WORKER_MARKER;
@@ -170,12 +170,56 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
     expect(toolsSeen.get("orchestrator")).toContain("get_subagent_result");
     expect(toolsSeen.get("orchestrator")).toContain("steer_subagent");
 
-    // The leaf never opted in, so it must not have them.
+    // The leaf is at the depth cap, so it must not have them.
     expect(toolsSeen.get("worker")).toBeDefined();
     expect(toolsSeen.get("worker")).not.toContain("Agent");
 
     // Two hops home: worker → orchestrator → parent.
     expect(run.responseText).toContain(WORKER_MARKER);
+  });
+
+  it("enables an already-running SDK child at its next normal turn", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "nested-e2e-live-policy-"));
+    tmpDirs.push(cwd);
+    writeAgents(cwd);
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ nestedAgentsEnabled: false }));
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered = false;
+    const childTools: string[][] = [];
+    let childResult: string | undefined;
+    try {
+      run = await runPrintMode({
+        prompt: "root-live-policy", cwd, live: false, hold: false,
+        beforeRun: () => { registerAgents(loadCustomAgents(cwd)); },
+        respond: async context => {
+          const route = firstUserText(context);
+          if (route === "leaf-live-policy") return WORKER_MARKER;
+          if (route === "child-live-policy") {
+            childTools.push((context.tools ?? []).map(tool => tool.name));
+            if (childTools.length === 1) {
+              entered = true;
+              await gate;
+              return fauxToolCall("read", { path: join(cwd, ".pi", "subagents.json") });
+            }
+            const result = toolResultTexts(context).find(item => item.name === "Agent");
+            if (result) { childResult = result.text; return result.text; }
+            return agentCall({ subagent_type: "worker", prompt: "leaf-live-policy", description: "leaf after enable" });
+          }
+          if (toolResultTexts(context).some(item => item.name === "Agent")) return "parent done";
+          return agentCall({ subagent_type: "orchestrator", prompt: "child-live-policy", description: "live policy child", run_in_background: true });
+        },
+      });
+      await vi.waitFor(() => expect(entered).toBe(true));
+      expect(childTools[0]).not.toContain("Agent");
+      await run.parentSession.prompt("/subagent-recursion on");
+      release();
+      expect(run.manager).toBeDefined();
+      await run.manager!.waitForAll();
+      expect(childTools[1]).toContain("Agent");
+      expect(childTools).toHaveLength(3);
+      expect(childResult).toContain(WORKER_MARKER);
+    } finally { release(); }
   });
 
   it("backgrounds a nested child, polls it by id, and streams its transcript", async () => {

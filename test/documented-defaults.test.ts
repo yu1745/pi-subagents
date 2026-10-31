@@ -34,8 +34,8 @@ describe("documented defaults (README:441)", () => {
   }, HEAVY_REIMPORT_MS);
 
   it("nested subagent depth defaults to 2", async () => {
-    const { getMaxSubagentDepth } = await import("../src/nested-tools.js");
-    expect(getMaxSubagentDepth()).toBe(2);
+    const { RecursionPolicy } = await import("../src/recursion-policy.js");
+    expect(new RecursionPolicy().effective).toEqual({ nestedAgentsEnabled: false, maxSubagentDepth: 2 });
   });
 
   // Raised from 4 when top-level spawns started defaulting to background:

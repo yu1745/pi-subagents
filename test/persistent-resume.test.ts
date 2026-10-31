@@ -70,6 +70,10 @@ it("fresh extension recovers original ID, handles and historical messages, ignor
   await first.lifecycle.get("session_shutdown")();
   const second = await boot();
   vi.mocked(runAgent).mockClear();
+  const historical = await second.tools.get("get_subagent_result").execute("read", { agent_id: "audit" }, undefined, undefined, second.context);
+  expect(textOf(historical)).toContain("historical answer");
+  expect(runAgent).not.toHaveBeenCalled();
+  expect(resumeAgent).not.toHaveBeenCalled();
   const response = await second.tools.get("Agent").execute("resume", {
     resume: id, subagent_type: "nonexistent-placeholder", model: "invalid/model", isolated: false,
     prompt: "continue", description: "Not original", run_in_background: false,
@@ -108,7 +112,9 @@ it("GC retains the original ID without a live session", async () => {
   vi.setSystemTime(Date.now() + 11 * 60000);
   const gc = manager as unknown as { cleanup(): void };
   gc.cleanup();
-  expect(manager.getRecord(id)).toBeUndefined();
+  expect(manager.getRecord(id)).toMatchObject({ result: "historical answer", resultConsumed: true, session: undefined });
+  expect(manager.resolveAgentRef("general-purpose")?.id).toBe(id);
+  expect(manager.listAgents().map(record => record.id)).toContain(id);
   const target = manager.resolveMention(id);
   expect(target?.kind).toBe("tombstone");
   if (target?.kind !== "tombstone") throw new Error("missing descriptor");
@@ -155,6 +161,8 @@ it("registry is owner-only, uncapped and fails closed on corrupt input", async (
   for (let i = 0; i < 102; i++) store.put({ ...original, id: `id-${i}`, handle: `agent-${i}`, alias: undefined });
   expect(new ResumeStore(parent.getSessionFile()!, parent.getSessionId()).list()).toHaveLength(103);
   expect(statSync(store.path).mode & 0o777).toBe(0o600);
+  writeFileSync(store.path, JSON.stringify({ version: 1, parentId: parent.getSessionId(), agents: store.list().map(entry => ({ ...entry, history: undefined })) }));
+  expect(new ResumeStore(parent.getSessionFile()!, parent.getSessionId()).list()[0].history).toBeUndefined();
   writeFileSync(store.path, "{}");
   expect(() => new ResumeStore(parent.getSessionFile()!, parent.getSessionId())).toThrow("Cannot load resume registry");
 });
@@ -250,6 +258,54 @@ it("surfaces atomic registry write failures rather than promising durability", a
   }, undefined, undefined, first.context);
   expect(textOf(result)).toContain("Cannot persist resume registry");
   expect(existsSync(store.path)).toBe(false);
+});
+
+it("restores failures, stops, interrupted startup and legacy identities without running tasks", async () => {
+  const first = await boot();
+  await spawn(first);
+  await first.lifecycle.get("session_shutdown")();
+  const store = new ResumeStore(parent.getSessionFile()!, parent.getSessionId());
+  const saved = store.list()[0];
+  for (const status of ["error", "stopped", "running"] as const) {
+    store.put({ ...saved, id: status, handle: status, alias: undefined,
+      sessionFile: status === "running" ? "" : saved.sessionFile,
+      resumeState: status === "running" ? undefined : saved.resumeState,
+      status, history: { ...saved.history!, status, error: "saved reason", result: "partial answer", resultConsumed: false },
+    });
+  }
+  store.put({ ...saved, id: "legacy", handle: "legacy", alias: undefined, history: undefined });
+  const complete = vi.fn();
+  const manager = new AgentManager(complete);
+  managers.push(manager);
+  vi.mocked(runAgent).mockClear();
+  vi.mocked(resumeAgent).mockClear();
+  manager.configurePersistence(parent.getSessionFile(), parent.getSessionId());
+  expect(manager.resolveAgentRef("error")).toMatchObject({ status: "error", error: "saved reason", result: "partial answer" });
+  expect(manager.resolveAgentRef("stopped")).toMatchObject({ status: "stopped", result: "partial answer" });
+  expect(manager.resolveAgentRef("running")).toMatchObject({ status: "stopped", error: expect.stringContaining("Interrupted") });
+  expect(manager.resolveAgentRef("legacy")?.error).toContain("Historical result unavailable");
+  expect(manager.listAgents().every(record => record.session === undefined && record.promise === undefined)).toBe(true);
+  expect(manager.hasRunning()).toBe(false);
+  expect(complete).not.toHaveBeenCalled();
+  const target = manager.resolveMention("running");
+  if (target?.kind !== "tombstone") throw new Error("missing history");
+  expect(() => manager.spawn(makePi().pi, ctx(), "Plan", "continue", { description: "resume", restore: target.entry })).toThrow("no saved execution metadata");
+  expect(runAgent).not.toHaveBeenCalled();
+  expect(resumeAgent).not.toHaveBeenCalled();
+  let finish!: (value: Awaited<ReturnType<typeof runAgent>>) => void;
+  vi.mocked(runAgent).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const activeId = manager.spawn(makePi().pi, ctx(), "general-purpose", "held", { description: "held", isBackground: true });
+  const other = SessionManager.create(home.dir, join(home.dir, "other-parent"));
+  manager.configurePersistence(other.getSessionFile(), other.getSessionId());
+  expect(manager.listAgents()).toHaveLength(0);
+  const dispose = vi.fn();
+  finish({ session: { dispose } as unknown as AgentSession, responseText: "late result", aborted: false, steered: false });
+  await flush();
+  expect(dispose).toHaveBeenCalledOnce();
+  expect(complete).not.toHaveBeenCalled();
+  expect(manager.resolveAgentRef(activeId)).toBeUndefined();
+  manager.configurePersistence(parent.getSessionFile(), parent.getSessionId());
+  expect(manager.resolveAgentRef("error")?.result).toBe("partial answer");
 });
 
 it("rejects a valid header with corrupt trailing JSON", () => {

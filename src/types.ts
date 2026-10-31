@@ -60,11 +60,6 @@ export interface AgentConfig {
   outputTranscript?: boolean;
   /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
   sessionDir?: string;
-  /**
-   * Nested delegation, off by default: undefined = no nested tools;
-   * "all" = any enabled agent; string[] = only those agent types.
-   */
-  allowedSubagents?: "all" | string[];
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
@@ -130,9 +125,8 @@ export type ViewerMarkdownMode = 'off' | 'assistant' | 'all';
 export type AgentMentionMode = 'model' | 'direct' | 'off';
 
 /**
- * What survives a record's eviction so `@handle` keeps working. The live record
- * is discarded after ~10 minutes, but the pi session it wrote is still on disk,
- * and this is the little that is needed to find and describe it again.
+ * Saved execution identity for explicit cold resume after SDK memory release.
+ * Top-level history remains queryable without retaining an SDK session.
  */
 export interface AgentResumeState {
   sessionId: string;
@@ -152,11 +146,13 @@ export interface AgentTombstone {
   id: string;
   type: SubagentType;
   description: string;
-  /** Always set — a record with no session file is never tombstoned. */
+  /** Empty for v2 history that never obtained a persisted conversation. */
   sessionFile: string;
   completedAt: number;
   resumeState?: AgentResumeState;
   status?: AgentRecord["status"];
+  /** Version 2 read-only history; absent in legacy identity-only entries. */
+  history?: Pick<AgentRecord, "startedAt" | "completedAt" | "status" | "result" | "error" | "toolUses" | "lifetimeUsage" | "compactionCount" | "resultConsumed" | "isBackground" | "invocation" | "worktreeResult" | "outputFile">;
 }
 
 /**
@@ -227,8 +223,8 @@ export interface AgentRecord {
   /**
    * The agent's pi session file, when it was persisted (`persist_session`, or
    * the `rememberAgents` default). Captured so a mention can reopen the
-   * conversation after the record itself has been evicted; undefined for an
-   * in-memory session, which leaves nothing to reopen.
+   * conversation after its SDK session has been released; undefined for an
+   * in-memory session, which leaves no conversation to reopen.
    */
   sessionFile?: string;
   resumeState?: AgentResumeState;
@@ -278,8 +274,6 @@ export interface AgentRecord {
    * `isTopLevelAgent`.
    */
   workflowId?: string;
-  /** Effective inherited nesting cap for this branch. */
-  maxSubagentDepth?: number;
   /**
    * Session id of the root (main) session this branch descends from. Nested
    * spawns inherit it so their transcripts file under the same session

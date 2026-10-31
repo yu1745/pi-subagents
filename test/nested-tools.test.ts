@@ -6,7 +6,7 @@ import { AgentManager } from "../src/agent-manager.js";
 import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
-import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager, setMaxSubagentDepth } from "../src/nested-tools.js";
+import { createNestedSubagentTools, type NestedAgentManager } from "../src/nested-tools.js";
 import { encodeCwd } from "../src/output-file.js";
 
 let cwd: string;
@@ -40,18 +40,16 @@ function ctx(executionCwd = cwd) {
 }
 
 function tools(
-  allowedSubagents: "all" | string[] = "all",
   depth = 1,
   maxSubagentDepth = 2,
   configCwd = cwd,
 ) {
+  lifecycle.recursionPolicy.configure({ nestedAgentsEnabled: true, maxSubagentDepth });
   return createNestedSubagentTools({
     manager,
     pi: {} as any,
     parentAgentId: "parent-1",
     depth,
-    maxSubagentDepth,
-    allowedSubagents,
     configCwd,
   });
 }
@@ -80,6 +78,8 @@ beforeEach(() => {
     return { id, record };
   });
   manager = {
+    recursionPolicy: lifecycle.recursionPolicy,
+    hasOwnedChildren: lifecycle.hasOwnedChildren.bind(lifecycle),
     spawn,
     spawnAndWait,
     awaitStartup: vi.fn(async () => {}),
@@ -97,7 +97,7 @@ afterEach(async () => {
 });
 
 describe("child-safe nested Agent tools", () => {
-  it("allows any enabled agent when allowed_subagents is omitted", async () => {
+  it("allows any enabled agent when the centralized switch is on", async () => {
     const [agent] = tools();
     const result = await execute(agent, {
       subagent_type: "reviewer",
@@ -111,7 +111,6 @@ describe("child-safe nested Agent tools", () => {
       expect.objectContaining({
         depth: 2,
         parentAgentId: "parent-1",
-        maxSubagentDepth: 2,
         configCwd: cwd,
       }),
       expect.any(Function), // onSpawned — attaches the child's transcript
@@ -140,17 +139,19 @@ describe("child-safe nested Agent tools", () => {
     }
   });
 
-  it("enforces a narrow allowlist", async () => {
-    const [limited] = tools(["scout"]);
+  it("enforces live off/on changes on an already-created tool", async () => {
+    const [limited] = tools();
+    lifecycle.recursionPolicy.command("off");
     const denied = await execute(limited, {
       subagent_type: "reviewer",
       description: "review evidence",
       prompt: "Review it",
     });
     expect(denied.isError).toBe(true);
-    expect(denied.content[0].text).toContain("not allowed");
+    expect(denied.content[0].text).toContain("enabled=false");
     expect(spawnAndWait).not.toHaveBeenCalled();
 
+    lifecycle.recursionPolicy.command("on");
     const allowed = await execute(limited, {
       subagent_type: "scout",
       description: "find files",
@@ -170,7 +171,7 @@ describe("child-safe nested Agent tools", () => {
     const before = getAvailableTypes();
 
     try {
-      const [agent] = tools("all", 1, 2, otherCwd);
+      const [agent] = tools(1, 2, otherCwd);
       const result = await execute(agent, {
         subagent_type: "branch-only",
         description: "branch agent",
@@ -229,8 +230,8 @@ describe("child-safe nested Agent tools", () => {
     expect(record.pendingSteers).toEqual(["focus on tests"]);
   });
 
-  it("blocks delegation at the inherited depth cap", async () => {
-    const [agent] = tools("all", 2, 2);
+  it("blocks delegation at the live depth cap", async () => {
+    const [agent] = tools(2, 2);
     const result = await execute(agent, {
       subagent_type: "scout",
       description: "find files",
@@ -259,7 +260,7 @@ describe("child-safe nested Agent tools", () => {
   });
 
   it("supports background launches and ownership-scopes result, resume, and steer", async () => {
-    const [agent, getResult, steer] = tools(["scout"]);
+    const [agent, getResult, steer] = tools();
     const launched = await execute(agent, {
       subagent_type: "scout",
       description: "find files",
@@ -272,6 +273,15 @@ describe("child-safe nested Agent tools", () => {
       expect.objectContaining({ isBackground: true, depth: 2, parentAgentId: "parent-1" }),
     );
 
+    lifecycle.recursionPolicy.command("off");
+    lifecycle.recursionPolicy.command("depth 0");
+    expect(records.get("child-1").status).toBe("running");
+    expect((await execute(steer, { agent_id: "child-1", message: "finish" })).isError).toBe(false);
+    records.get("child-1").status = "completed";
+    vi.mocked(manager.resume).mockResolvedValue(records.get("child-1"));
+    expect((await execute(agent, { resume: "child-1", prompt: "continue" })).isError).toBe(false);
+    expect(manager.resume).toHaveBeenCalledTimes(1);
+    vi.mocked(manager.resume).mockClear();
     const own = await execute(getResult, { agent_id: "child-1" });
     expect(own.isError).toBe(false);
 
@@ -313,6 +323,28 @@ describe("child-safe nested Agent tools", () => {
     expect(manager.resume).toHaveBeenCalledWith("child-scout", "Again", undefined, { maxTurns: undefined });
   });
 
+  it("resuming an owned child cannot bypass live policy for its subsequent descendants", async () => {
+    const [parentAgent] = tools();
+    records.set("child", { id: "child", type: "scout", status: "completed", result: "done", parentAgentId: "parent-1" });
+    const [childAgent] = createNestedSubagentTools({ manager, pi: {} as never, parentAgentId: "child", depth: 2, configCwd: cwd });
+    const blocked: boolean[] = [];
+    vi.mocked(manager.resume).mockImplementation(async () => {
+      const result = await execute(childAgent, { subagent_type: "scout", description: "grandchild", prompt: "work" });
+      blocked.push(result.isError === true);
+      return records.get("child");
+    });
+    lifecycle.recursionPolicy.command("off");
+    expect((await execute(parentAgent, { resume: "child", prompt: "continue" })).isError).toBe(false);
+    lifecycle.recursionPolicy.command("on");
+    expect((await execute(parentAgent, { resume: "child", prompt: "continue" })).isError).toBe(false);
+    expect(blocked).toEqual([true, true]);
+    expect(spawnAndWait).not.toHaveBeenCalled();
+    lifecycle.recursionPolicy.command("depth 3");
+    expect((await execute(parentAgent, { resume: "child", prompt: "continue" })).isError).toBe(false);
+    expect(blocked).toEqual([true, true, false]);
+    expect(spawnAndWait).toHaveBeenCalledTimes(1);
+  });
+
   it("reports a background child that fails to start as a tool error", async () => {
     // Under isolation: "worktree" the child is not running when spawn() returns
     // — the repo copy is awaited. The failure must reach the parent as an error
@@ -320,7 +352,7 @@ describe("child-safe nested Agent tools", () => {
     vi.mocked(manager.awaitStartup).mockRejectedValueOnce(
       new Error('Cannot run with isolation: "worktree"'),
     );
-    const [agent] = tools(["scout"]);
+    const [agent] = tools();
 
     const result = await execute(agent, {
       subagent_type: "scout",
@@ -391,7 +423,7 @@ describe("child-safe nested Agent tools", () => {
     // allowlist never named.
     setFallbackSubagent("scout");
     try {
-      const [agent] = tools(["scout"]);
+      const [agent] = tools();
       const result = await execute(agent, {
         subagent_type: "definitely-missing",
         description: "typo",
@@ -406,8 +438,12 @@ describe("child-safe nested Agent tools", () => {
     }
   });
 
-  it("hands the branch cap down to the child it spawns", async () => {
-    const [agent] = tools("all", 1, 3);
+  it("uses raised and lowered live caps without inheriting a snapshot", async () => {
+    const [agent] = tools(1, 3);
+    lifecycle.recursionPolicy.command("depth 1");
+    expect((await execute(agent, { subagent_type: "scout", prompt: "blocked" })).isError).toBe(true);
+    expect(spawnAndWait).not.toHaveBeenCalled();
+    lifecycle.recursionPolicy.command("depth 3");
     const result = await execute(agent, {
       subagent_type: "scout",
       description: "child",
@@ -417,9 +453,10 @@ describe("child-safe nested Agent tools", () => {
     expect(result.isError).toBe(false);
     expect(spawnAndWait).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), "scout", "Do work",
-      expect.objectContaining({ depth: 2, maxSubagentDepth: 3 }),
+      expect.objectContaining({ depth: 2 }),
       expect.any(Function),
     );
+    expect(spawnAndWait.mock.calls[0][4]).not.toHaveProperty("maxSubagentDepth");
   });
 
   it("flags a truncated child run instead of passing partial output off as complete", async () => {
@@ -561,32 +598,5 @@ describe("child-safe nested Agent tools", () => {
     } as any, undefined, undefined, executionCtx);
 
     expect(spawnAndWait.mock.calls[0][1]).toBe(executionCtx);
-  });
-});
-
-// setMaxSubagentDepth clamps its input, but test/settings.test.ts only asserts
-// the applier SPY was called — the real Math.max(0, Math.floor(n)) never runs
-// there. A hand-edited subagents.json reaches this unfiltered, and losing the
-// clamp is silent in the worst direction: a negative depth makes the
-// `depth >= maxSubagentDepth` check true everywhere, disabling nested
-// delegation project-wide with no error.
-describe("setMaxSubagentDepth clamping", () => {
-  let previous: number;
-  beforeEach(() => { previous = getMaxSubagentDepth(); });
-  afterEach(() => { setMaxSubagentDepth(previous); });
-
-  it("floors a negative depth at 0 rather than storing it", () => {
-    setMaxSubagentDepth(-1);
-    expect(getMaxSubagentDepth()).toBe(0);
-  });
-
-  it("truncates a fractional depth toward zero", () => {
-    setMaxSubagentDepth(2.9);
-    expect(getMaxSubagentDepth()).toBe(2);
-  });
-
-  it("stores a valid depth unchanged", () => {
-    setMaxSubagentDepth(3);
-    expect(getMaxSubagentDepth()).toBe(3);
   });
 });

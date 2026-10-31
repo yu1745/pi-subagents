@@ -179,7 +179,6 @@ describe("status note reaches the parent through the real handlers", () => {
       isBackground: true,
       parentAgentId: topId,
       depth: 2,
-      maxSubagentDepth: 2,
     });
     await new Promise(resolve => setTimeout(resolve, 0));
 
@@ -311,7 +310,6 @@ describe("subagents:compacted", () => {
       isBackground: true,
       parentAgentId: parentId,
       depth: 2,
-      maxSubagentDepth: 2,
     });
     await new Promise(resolve => setTimeout(resolve, 0));
 

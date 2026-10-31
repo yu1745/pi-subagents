@@ -743,11 +743,11 @@ describe("FleetList overlay lifecycle", () => {
     h.fleet.dispose();
   });
 
-  it("lingers a finished agent in the list, then drops it after the window", () => {
+  it("keeps finished history listed beyond the old linger window without an SDK session", () => {
     const recent = makeRecord({ id: "r", description: "recent done", status: "completed", completedAt: Date.now() });
     expect(harness([recent]).render().some(l => l.includes("recent done"))).toBe(true);
-    const old = makeRecord({ id: "o", description: "old done", status: "completed", completedAt: Date.now() - 60_000 });
-    expect(harness([old]).render().some(l => l.includes("old done"))).toBe(false);
+    const old = makeRecord({ id: "o", description: "old done", status: "completed", completedAt: Date.now() - 60_000, session: undefined });
+    expect(harness([old]).render().some(l => l.includes("old done"))).toBe(true);
   });
 });
 

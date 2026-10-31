@@ -355,6 +355,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     noContextFiles: true,
   });
   await loader.reload();
+  if (loader.getExtensions().errors.length) throw new Error(JSON.stringify(loader.getExtensions().errors));
 
   // Run any test-supplied registration (e.g. loadCustomAgents) now that globals
   // are isolated but before the parent turn spawns anything.
@@ -381,6 +382,9 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   // Binding fires session_start so the extension initializes and publishes its
   // manager on the global Symbol.
   await session.bindExtensions({});
+  // This harness explicitly exercises model-facing orchestration. It is opt-in
+  // in normal sessions; enable through the command rather than bypassing scope.
+  await session.prompt("/subagent-tools on");
 
   const manager = (globalThis as Record<symbol, unknown>)[MANAGER_KEY] as
     | ManagerHandle

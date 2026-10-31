@@ -234,7 +234,6 @@ describe("AgentManager — nested runtime propagation", () => {
       isBackground: true,
       depth: 2,
       parentAgentId: "parent-1",
-      maxSubagentDepth: 3,
       configCwd: "/trusted/config",
     });
     await manager.getRecord(id)!.promise;
@@ -242,8 +241,10 @@ describe("AgentManager — nested runtime propagation", () => {
     expect(manager.getRecord(id)).toEqual(expect.objectContaining({
       depth: 2,
       parentAgentId: "parent-1",
-      maxSubagentDepth: 3,
     }));
+    expect(manager.getRecord(id)).not.toHaveProperty("maxSubagentDepth");
+    expect(manager.hasOwnedChildren("parent-1")).toBe(true);
+    expect(manager.hasOwnedChildren("foreign")).toBe(false);
     expect(runAgent).toHaveBeenLastCalledWith(
       mockCtx,
       "scout",
@@ -254,7 +255,6 @@ describe("AgentManager — nested runtime propagation", () => {
           manager,
           parentAgentId: id,
           depth: 2,
-          maxSubagentDepth: 3,
         },
       }),
     );
@@ -865,8 +865,8 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     });
     await expect(manager.awaitStartup(id)).rejects.toThrow(/isolation: "worktree"/);
 
-    // Cleaned up — no orphan in listAgents()
-    expect(manager.listAgents()).toEqual([]);
+    // Startup failures remain historical records, never live tasks.
+    expect(manager.getRecord(id)).toMatchObject({ status: "error", error: expect.stringContaining('isolation: "worktree"') });
     // runAgent never invoked — strict, no silent fallback
     expect(runAgent).not.toHaveBeenCalled();
   });
@@ -915,7 +915,7 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
       isolation: "worktree",
     })).rejects.toThrow(/isolation: "worktree"/);
 
-    expect(manager.listAgents()).toEqual([]);
+    expect(manager.listAgents()).toEqual([expect.objectContaining({ status: "error" })]);
     expect(runAgent).not.toHaveBeenCalled();
   });
 

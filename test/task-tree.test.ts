@@ -78,7 +78,6 @@ describe("unified task tree", () => {
     { kind: "shell", shell: "bash", label: "bash" },
     { kind: "shell", shell: undefined, label: "shell" },
     { kind: undefined, shell: undefined, label: "shell" },
-    { kind: "agent", shell: "powershell", label: "process" },
     { kind: "monitor", shell: "powershell", label: "monitor" },
   ] satisfies { kind: Job["kind"]; shell: Job["shell"]; label: string }[])("labels $kind/$shell as $label in running and completed rows", ({ kind, shell, label }) => {
     const j = { ...job("label"), kind, shell };

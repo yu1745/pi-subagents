@@ -34,9 +34,17 @@ function isDescriptor(value: unknown): value is AgentTombstone {
     || typeof value.handle !== "string" || !/^[a-z0-9_-]{1,64}$/.test(value.handle)
     || (value.alias !== undefined && (typeof value.alias !== "string" || !/^[a-z0-9_-]{1,64}$/.test(value.alias)))
     || typeof value.type !== "string" || !value.type || typeof value.description !== "string"
-    || typeof value.sessionFile !== "string" || !isAbsolute(value.sessionFile)
+    || typeof value.sessionFile !== "string" || (!isAbsolute(value.sessionFile) && !(value.sessionFile === "" && object(value.history)))
     || typeof value.completedAt !== "number" || !Number.isFinite(value.completedAt)) return false;
+  if (value.history !== undefined) {
+    const h = value.history;
+    if (!object(h) || !["queued", "running", "completed", "steered", "aborted", "stopped", "error"].includes(h.status as string)
+      || typeof h.startedAt !== "number" || !Number.isFinite(h.startedAt)
+      || typeof h.toolUses !== "number" || typeof h.compactionCount !== "number" || !object(h.lifetimeUsage)
+      || ["result", "error", "outputFile"].some(key => h[key] !== undefined && typeof h[key] !== "string")) return false;
+  }
   const state = value.resumeState;
+  if (state === undefined && value.history !== undefined) return true;
   return object(state) && typeof state.sessionId === "string" && state.sessionId.length > 0
     && typeof state.cwd === "string" && isAbsolute(state.cwd)
     && typeof state.configCwd === "string" && isAbsolute(state.configCwd)
@@ -62,7 +70,7 @@ export class ResumeStore {
     }
     try {
       const data: unknown = JSON.parse(text);
-      if (!object(data) || data.version !== 1 || data.parentId !== parentId || !Array.isArray(data.agents)) throw new Error("invalid registry envelope");
+      if (!object(data) || ![1, 2].includes(data.version as number) || data.parentId !== parentId || !Array.isArray(data.agents)) throw new Error("invalid registry envelope");
       const handles = new Set<string>();
       for (const entry of data.agents) {
         if (!isDescriptor(entry) || this.entries.has(entry.id)) throw new Error("invalid or duplicate agent descriptor");
@@ -91,7 +99,7 @@ export class ResumeStore {
       chmodSync(dir, 0o700);
       const fd = openSync(temp, "wx", 0o600);
       try {
-        writeFileSync(fd, JSON.stringify({ version: 1, parentId: this.parentId, agents: [...next.values()] }) + "\n");
+        writeFileSync(fd, JSON.stringify({ version: 2, parentId: this.parentId, agents: [...next.values()] }) + "\n");
         fsyncSync(fd);
       } finally { closeSync(fd); }
       renameSync(temp, this.path);

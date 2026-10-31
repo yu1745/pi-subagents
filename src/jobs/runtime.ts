@@ -8,7 +8,6 @@ import { acquireLogLease } from "./patty/log-leases.js";
 import { renderSidebar, stopSidebarTicker } from "./patty/registry.js";
 import { registerShortcuts } from "./patty/shortcuts.js";
 import { BackgroundRegistry } from "./patty/state.js";
-import { registerAgentBgTool } from "./patty/tools/agent-bg.js";
 import { registerBashTool } from "./patty/tools/bash.js";
 import { registerBashBgTool } from "./patty/tools/bash-bg.js";
 import { registerJobsTool } from "./patty/tools/jobs.js";
@@ -193,7 +192,6 @@ export class JobRuntime {
     registerBashBgTool(scopedPi, reg);
     registerJobsTool(scopedPi, reg);
     registerMonitorTool(scopedPi, reg);
-    if (!/^(1|true|yes)$/i.test(process.env.PI_PATTY_DISABLE_AGENT_BG ?? "")) registerAgentBgTool(scopedPi, reg);
     registerInputHandlers(scopedPi, reg);
     if (owner.agentId) pi.on("session_shutdown", async () => {
       // Session GC is not job/log eviction. Do not retain the disposed SDK

@@ -1044,7 +1044,7 @@ describe("resuming an evicted agent by name", () => {
     const id = await spawnBackground(tools);
     await flush();
     const manager = await evict(id);
-    expect(manager.getRecord(id)).toBeUndefined();
+    expect(manager.getRecord(id)).toMatchObject({ result: "first answer", session: undefined });
     vi.mocked(runAgent).mockClear();
 
     const uiCtx = ctx();
@@ -1251,7 +1251,7 @@ describe("resuming an evicted agent by name", () => {
     expect(manager.getRecord(resumedId).description).toBe("find flaky tests");
   });
 
-  it("does not let the tools steer or read an agent that is gone", async () => {
+  it("reads historical results after SDK release but refuses steering", async () => {
     // A mention can resurrect it, but there is no live record to interrupt and
     // no result to return — so the tools must say so rather than resolve to a
     // tombstone and act on stale data.
@@ -1267,8 +1267,8 @@ describe("resuming an evicted agent by name", () => {
       "tc", { agent_id: "explore" }, undefined, undefined, ctx(),
     );
 
-    expect(textOf(steered)).toContain("Agent not found");
-    expect(textOf(read)).toContain("Agent not found");
+    expect(textOf(steered)).toContain("not running");
+    expect(textOf(read)).toContain("first answer");
   });
 
   it("reports a session that is gone, rather than starting something else", async () => {
@@ -1316,7 +1316,7 @@ describe("resuming an evicted agent by name", () => {
     await flush();
 
     expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
-    expect(manager.getRecord(id)).toBeUndefined();
+    expect(manager.getRecord(id)).toMatchObject({ result: "first answer", session: undefined });
     expect(uiCtx.ui.notify).toHaveBeenCalledWith(
       expect.stringContaining(`Could not resume @explore: Cannot resume session "${sessionPath()}"`), "warning",
     );

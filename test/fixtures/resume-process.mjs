@@ -51,7 +51,9 @@ try {
     await manager.dispose();
     console.log(JSON.stringify({ phase, id, pid: process.pid }));
   } else {
-    assert.equal(manager.listAgents().length, 0, "restart must not automatically run children");
+    assert.equal(manager.hasRunning(), false, "restart must not automatically run children");
+    assert.equal(manager.getRecord(saved.id).result, "historical-answer-741");
+    assert.equal(manager.getRecord(saved.id).session, undefined);
     const target = manager.resolveMention(saved.id);
     assert.equal(target?.kind, "tombstone");
     assert.equal(target.entry.handle, saved.handle);

@@ -52,16 +52,14 @@ export function isTerminalStatus(status: JobStatus): boolean {
 }
 
 /** What kind of background job this is. "shell" is the default (bash/bash_bg);
- *  "agent" is a background pi -p process (agent_bg); "monitor" is a
- *  streaming-event watch (the monitor tool). */
-export type JobKind = "shell" | "agent" | "monitor";
+ *  "monitor" is a streaming-event watch (the monitor tool). */
+export type JobKind = "shell" | "monitor";
 
 /** Claude Code's typed task-id prefixes — one letter per kind, followed by 8
  *  random base36 chars (e.g. `b7f3k9a2x1`). See registry.newJobId. */
 export const JOB_ID_PREFIX: Record<JobKind, string> = {
     shell: "b",
     monitor: "m",
-    agent: "a",
 };
 
 export interface Job {
