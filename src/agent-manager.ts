@@ -395,6 +395,8 @@ export class AgentManager {
   private inFlight = new Set<string>();
   private closing = new Map<string, Promise<void>>();
   private disposed = false;
+  private messageWaiters = new Map<AgentRecord, Set<AbortController>>();
+  private pendingParentMessages = new WeakSet<AgentRecord>();
   private sessionViews = new Map<AgentRecord, SessionViewRetention>();
   private untrackedSessions = new WeakSet<AgentSession>();
   private closingViews = 0;
@@ -948,6 +950,7 @@ export class AgentManager {
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
+      onParentMessage: message => this.sendParentMessage(pi, record, message),
       jobRuntime: this.jobRuntime,
       model: options.model,
       maxTurns: options.maxTurns,
@@ -1637,6 +1640,32 @@ export class AgentManager {
     return true;
   }
 
+  /** Route child reports to their owner; a report is not a completed result. */
+  private async sendParentMessage(pi: ExtensionAPI, record: AgentRecord, message: string): Promise<void> {
+    if (this.disposed || this.agents.get(record.id) !== record || record.status !== "running" || record.abortController?.signal.aborted) {
+      throw new Error("This agent is no longer running in its parent session");
+    }
+    const content = `Interim message from subagent ${record.handle ?? record.type} (${record.id}); the task is still running.\n\n${message}`;
+    if (record.parentAgentId !== undefined) {
+      if (!await this.steerChecked(record.parentAgentId, content)) throw new Error("Parent agent is no longer running");
+    } else {
+      pi.sendMessage({
+        customType: "subagent-message", content, display: true,
+        details: { agentId: record.id, agentType: record.type, workflowId: record.workflowId },
+      }, { deliverAs: "steer", triggerTurn: true });
+    }
+    // Release result collection so the parent can process its queued message.
+    // Wake sibling waits too: one parallel tool batch must not strand the report.
+    for (const waiting of this.agents.values()) {
+      if (waiting.parentAgentId === record.parentAgentId) this.pendingParentMessages.add(waiting);
+    }
+    for (const [waiting, controllers] of this.messageWaiters) {
+      if (waiting.parentAgentId === record.parentAgentId) {
+        for (const controller of controllers) controller.abort();
+      }
+    }
+  }
+
   /** Consumption suppresses notifications; it never removes historical output. */
   consumeResult(id: string): boolean {
     const record = this.resolveAgentRef(id);
@@ -1668,8 +1697,28 @@ export class AgentManager {
   }
 
   /** Wait through queueing and async startup; cancelling the wait never stops the child. */
-  async waitForTerminal(record: AgentRecord, signal?: AbortSignal): Promise<void> {
+  async waitForTerminal(record: AgentRecord, signal?: AbortSignal, wakeOnMessage = false): Promise<void> {
     if (signal?.aborted) throw signal.reason;
+    if (wakeOnMessage) {
+      if (this.pendingParentMessages.delete(record)) return;
+      const wake = new AbortController();
+      let controllers = this.messageWaiters.get(record);
+      if (!controllers) { controllers = new Set(); this.messageWaiters.set(record, controllers); }
+      controllers.add(wake);
+      const cancel = () => wake.abort(signal?.reason);
+      signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        await this.waitForTerminal(record, wake.signal);
+      } catch (error) {
+        if (!wake.signal.aborted || signal?.aborted) throw error;
+        this.pendingParentMessages.delete(record);
+      } finally {
+        signal?.removeEventListener("abort", cancel);
+        controllers.delete(wake);
+        if (!controllers.size) this.messageWaiters.delete(record);
+      }
+      return;
+    }
     let awaitedRun: AgentRecord["promise"];
     while (record.status === "queued" || record.status === "running" || this.inFlight.has(record.id)) {
       if (record.status === "queued") {

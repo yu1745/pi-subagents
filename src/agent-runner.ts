@@ -26,6 +26,7 @@ import { detectEnv } from "./env.js";
 import type { JobRuntime } from "./jobs/runtime.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, type NestedAgentManager } from "./nested-tools.js";
+import { createParentMessageTool, SEND_PARENT_MESSAGE } from "./parent-message.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { validateResumeSession } from "./resume-store.js";
 import { preloadSkills } from "./skill-loader.js";
@@ -406,6 +407,8 @@ export interface RunOptions {
   pi: ExtensionAPI;
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
+  /** Manager-bound route to the immediate parent, independent of nested delegation. */
+  onParentMessage?: (message: string) => void | Promise<void>;
   /** Parent-owned shell service; absent when fusion is disabled. */
   jobRuntime?: JobRuntime;
   model?: Model<any>;
@@ -647,6 +650,9 @@ export async function runAgent(
   // Resolved here, not by each caller: mention and RPC spawns pass no `isolated`,
   // and the agent file's value must hold on every path.
   const isolated = agentConfig?.isolated ?? options.isolated;
+  const parentTools = options.onParentMessage && !agentConfig?.disallowedTools?.includes(SEND_PARENT_MESSAGE)
+    ? [createParentMessageTool(options.onParentMessage)] : [];
+  extras.parentMessaging = parentTools.length > 0;
   // Resolve extensions/skills: isolated overrides to false
   const extensions = isolated ? false : config.extensions;
   // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
@@ -900,6 +906,7 @@ export async function runAgent(
     return new Set([
       ...[...nestedToolNames].filter(name => nestedAvailable && !disallowedSet?.has(name)),
       ...structuredToolNames,
+      ...parentTools.map(tool => tool.name),
     ]);
   };
 
@@ -947,6 +954,7 @@ export async function runAgent(
       // satisfy it would make the request unsatisfiable by construction rather
       // than merely restricted.
       ...structuredToolNames,
+      ...parentTools.map(tool => tool.name),
     ];
   } else {
     // Deny the orchestration tools EXCEPT the nested ones this agent opted into —
@@ -1017,7 +1025,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: [...nestedTools, ...structuredTools],
+    customTools: [...nestedTools, ...structuredTools, ...parentTools],
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {
@@ -1053,7 +1061,7 @@ export async function runAgent(
   // (we can't deny the name of a tool that hasn't registered yet). Both are
   // handled below by re-deriving scope from the loader's live extension maps —
   // `registerTool` writes into those same maps, so late arrivals are judged too.
-  if (!noExtensions || nestedTools.length > 0) {
+  if (!noExtensions || nestedTools.length > 0 || parentTools.length > 0) {
     installExtensionToolScope(session, {
       loader,
       toolNames,

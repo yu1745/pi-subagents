@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Subagents can report without finishing.** `send_parent_message` delivers findings and decision requests to the immediate parent while work continues. Tool and child prompt guidance explain when to report; interim messages release result waits without consuming the final result, and normal completion remains separate.
 - **Configurable subagent tool visibility.** `subagentToolsEnabled` accepts `true` or `false` (default `false`), with session overrides taking priority over project and user configuration. Project configuration enables tools at startup, including `pi -p`; `/subagent-tools reset` clears the session override.
 
 ### Changed

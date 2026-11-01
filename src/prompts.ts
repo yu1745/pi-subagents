@@ -6,6 +6,8 @@ import type { AgentConfig, EnvInfo } from "./types.js";
 
 /** Extra sections to inject into the system prompt (memory, skills, etc.). */
 export interface PromptExtras {
+  /** Present only when the child can send interim messages to its parent. */
+  parentMessaging?: boolean;
   /** Persistent memory content to inject (first 200 lines of MEMORY.md + instructions). */
   memoryBlock?: string;
   /** Preloaded skill contents to inject. */
@@ -88,6 +90,9 @@ Return only the answer, in exactly the shape the prompt asks for — no preamble
 
   // Build optional extras suffix
   const extraSections: string[] = [];
+  if (extras?.parentMessaging) {
+    extraSections.push("Use send_parent_message to proactively share important findings, request a decision on a blocker, or propose a scope change while working. State the evidence and what you need, then continue independent work; return the completed result in the task's required format.");
+  }
   if (extras?.memoryBlock) {
     extraSections.push(extras.memoryBlock);
   }

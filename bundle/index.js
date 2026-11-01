@@ -1707,7 +1707,7 @@ function createNestedSubagentTools(context) {
       if (!ownsRecord(record2, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
-      if (params.wait) await context.manager.waitForTerminal(record2, signal);
+      if (params.wait) await context.manager.waitForTerminal(record2, signal, true);
       if (record2.status !== "queued" && record2.status !== "running") record2.resultConsumed = true;
       return textResult(formatRecord(record2, "fetched"), record2.status === "error");
     }, "execute")
@@ -1761,6 +1761,33 @@ var init_nested_tools = __esm({
   }
 });
 
+// src/parent-message.ts
+import { defineTool as defineTool2 } from "@earendil-works/pi-coding-agent";
+import { Type as Type3 } from "@sinclair/typebox";
+function createParentMessageTool(send) {
+  return defineTool2({
+    name: SEND_PARENT_MESSAGE,
+    label: "Message parent",
+    description: "Send an interim message to your parent agent without ending your task. Proactively report findings that affect the plan, blockers needing a decision, or a necessary scope change. Include the relevant evidence and what you need; continue independent work while awaiting guidance. The completed result is returned separately in the task's required format.",
+    parameters: Type3.Object({ message: Type3.String({ minLength: 1, description: "Concise finding or decision request, with evidence and the next action." }) }),
+    execute: /* @__PURE__ */ __name(async (_id, params, signal) => {
+      signal?.throwIfAborted();
+      const message = params.message.trim();
+      if (!message) throw new Error("Parent message must not be blank");
+      await send(message);
+      return { content: [{ type: "text", text: "Message queued for your parent. Your task is still running; continue work that does not depend on the reply." }], details: {} };
+    }, "execute")
+  });
+}
+var SEND_PARENT_MESSAGE;
+var init_parent_message = __esm({
+  "src/parent-message.ts"() {
+    "use strict";
+    SEND_PARENT_MESSAGE = "send_parent_message";
+    __name(createParentMessageTool, "createParentMessageTool");
+  }
+});
+
 // src/prompts.ts
 function buildAgentPrompt(config, cwd, env, parentSystemPrompt, extras) {
   const activeAgentTag = `<active_agent name="${config.name}"/>
@@ -1784,6 +1811,9 @@ Your final message IS the return value of this task. A workflow script captures 
 Return only the answer, in exactly the shape the prompt asks for \u2014 no preamble, no summary of what you did, no offer to continue.
 </workflow_child>` : "";
   const extraSections = [];
+  if (extras?.parentMessaging) {
+    extraSections.push("Use send_parent_message to proactively share important findings, request a decision on a blocker, or propose a scope change while working. State the evidence and what you need, then continue independent work; return the completed result in the task's required format.");
+  }
   if (extras?.memoryBlock) {
     extraSections.push(extras.memoryBlock);
   }
@@ -2028,12 +2058,12 @@ var init_skill_loader = __esm({
 });
 
 // src/structured-output.ts
-import { defineTool as defineTool2 } from "@earendil-works/pi-coding-agent";
+import { defineTool as defineTool3 } from "@earendil-works/pi-coding-agent";
 function createStructuredCapture() {
   return { called: false };
 }
 function createStructuredOutputTool(compiled, capture) {
-  return defineTool2({
+  return defineTool3({
     name: STRUCTURED_OUTPUT_TOOL_NAME,
     label: "Structured Output",
     description: "Report your final answer. Call this exactly once, with the complete result, and put everything the caller needs inside the arguments \u2014 text written outside this call is discarded. If a call is rejected for not matching the schema, fix the reported fields and call it again.",
@@ -2334,6 +2364,8 @@ async function runAgent(ctx, type, prompt, options) {
   if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
   if (options.workflow && !options.structuredOutput) extras.workflowChild = true;
   const isolated = agentConfig?.isolated ?? options.isolated;
+  const parentTools = options.onParentMessage && !agentConfig?.disallowedTools?.includes(SEND_PARENT_MESSAGE) ? [createParentMessageTool(options.onParentMessage)] : [];
+  extras.parentMessaging = parentTools.length > 0;
   const extensions = isolated ? false : config.extensions;
   const excludeExtensions = isolated ? void 0 : config.excludeExtensions;
   const skills = isolated ? false : config.skills;
@@ -2477,7 +2509,8 @@ async function runAgent(ctx, type, prompt, options) {
     const nestedAvailable = nestedRuntime && (nestedRuntime.manager.recursionPolicy.canSpawn(nestedRuntime.depth) || nestedRuntime.manager.hasOwnedChildren(nestedRuntime.parentAgentId));
     return /* @__PURE__ */ new Set([
       ...[...nestedToolNames].filter((name) => nestedAvailable && !disallowedSet?.has(name)),
-      ...structuredToolNames
+      ...structuredToolNames,
+      ...parentTools.map((tool) => tool.name)
     ]);
   }, "readmitToolNames");
   const builtinToolNameSet = new Set(toolNames);
@@ -2493,7 +2526,8 @@ async function runAgent(ctx, type, prompt, options) {
       // the caller asked for a schema, and removing the only tool that can
       // satisfy it would make the request unsatisfiable by construction rather
       // than merely restricted.
-      ...structuredToolNames
+      ...structuredToolNames,
+      ...parentTools.map((tool) => tool.name)
     ];
   } else {
     const denyTools = new Set(
@@ -2538,7 +2572,7 @@ async function runAgent(ctx, type, prompt, options) {
     ...parentModelRuntime !== void 0 && { modelRuntime: parentModelRuntime },
     model,
     tools: sessionTools,
-    customTools: [...nestedTools, ...structuredTools],
+    customTools: [...nestedTools, ...structuredTools, ...parentTools],
     resourceLoader: loader
   };
   if (sessionExcludeTools) {
@@ -2560,7 +2594,7 @@ async function runAgent(ctx, type, prompt, options) {
       });
     }, "onError")
   });
-  if (!noExtensions || nestedTools.length > 0) {
+  if (!noExtensions || nestedTools.length > 0 || parentTools.length > 0) {
     installExtensionToolScope(session, {
       loader,
       toolNames,
@@ -2758,6 +2792,7 @@ var init_agent_runner = __esm({
     init_env();
     init_memory();
     init_nested_tools();
+    init_parent_message();
     init_prompts();
     init_resume_store();
     init_skill_loader();
@@ -4374,6 +4409,8 @@ var init_agent_manager = __esm({
       inFlight = /* @__PURE__ */ new Set();
       closing = /* @__PURE__ */ new Map();
       disposed = false;
+      messageWaiters = /* @__PURE__ */ new Map();
+      pendingParentMessages = /* @__PURE__ */ new WeakSet();
       sessionViews = /* @__PURE__ */ new Map();
       untrackedSessions = /* @__PURE__ */ new WeakSet();
       closingViews = 0;
@@ -4831,6 +4868,7 @@ var init_agent_manager = __esm({
         const promise = runAgent(ctx, type, prompt, {
           pi,
           agentId: id,
+          onParentMessage: /* @__PURE__ */ __name((message) => this.sendParentMessage(pi, record2, message), "onParentMessage"),
           jobRuntime: this.jobRuntime,
           model: options.model,
           maxTurns: options.maxTurns,
@@ -5341,6 +5379,33 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
         if (result === "handled") throw new Error("Child input was intercepted by another extension; steer receipt is unconfirmed");
         return true;
       }
+      /** Route child reports to their owner; a report is not a completed result. */
+      async sendParentMessage(pi, record2, message) {
+        if (this.disposed || this.agents.get(record2.id) !== record2 || record2.status !== "running" || record2.abortController?.signal.aborted) {
+          throw new Error("This agent is no longer running in its parent session");
+        }
+        const content = `Interim message from subagent ${record2.handle ?? record2.type} (${record2.id}); the task is still running.
+
+${message}`;
+        if (record2.parentAgentId !== void 0) {
+          if (!await this.steerChecked(record2.parentAgentId, content)) throw new Error("Parent agent is no longer running");
+        } else {
+          pi.sendMessage({
+            customType: "subagent-message",
+            content,
+            display: true,
+            details: { agentId: record2.id, agentType: record2.type, workflowId: record2.workflowId }
+          }, { deliverAs: "steer", triggerTurn: true });
+        }
+        for (const waiting of this.agents.values()) {
+          if (waiting.parentAgentId === record2.parentAgentId) this.pendingParentMessages.add(waiting);
+        }
+        for (const [waiting, controllers] of this.messageWaiters) {
+          if (waiting.parentAgentId === record2.parentAgentId) {
+            for (const controller of controllers) controller.abort();
+          }
+        }
+      }
       /** Consumption suppresses notifications; it never removes historical output. */
       consumeResult(id) {
         const record2 = this.resolveAgentRef(id);
@@ -5367,8 +5432,31 @@ Changes saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git mer
         return matches[0];
       }
       /** Wait through queueing and async startup; cancelling the wait never stops the child. */
-      async waitForTerminal(record2, signal) {
+      async waitForTerminal(record2, signal, wakeOnMessage = false) {
         if (signal?.aborted) throw signal.reason;
+        if (wakeOnMessage) {
+          if (this.pendingParentMessages.delete(record2)) return;
+          const wake = new AbortController();
+          let controllers = this.messageWaiters.get(record2);
+          if (!controllers) {
+            controllers = /* @__PURE__ */ new Set();
+            this.messageWaiters.set(record2, controllers);
+          }
+          controllers.add(wake);
+          const cancel = /* @__PURE__ */ __name(() => wake.abort(signal?.reason), "cancel");
+          signal?.addEventListener("abort", cancel, { once: true });
+          try {
+            await this.waitForTerminal(record2, wake.signal);
+          } catch (error) {
+            if (!wake.signal.aborted || signal?.aborted) throw error;
+            this.pendingParentMessages.delete(record2);
+          } finally {
+            signal?.removeEventListener("abort", cancel);
+            controllers.delete(wake);
+            if (!controllers.size) this.messageWaiters.delete(record2);
+          }
+          return;
+        }
         let awaitedRun;
         while (record2.status === "queued" || record2.status === "running" || this.inFlight.has(record2.id)) {
           if (record2.status === "queued") {
@@ -6592,9 +6680,9 @@ init_agent_color();
 import { existsSync as existsSync12, mkdirSync as mkdirSync8, readFileSync as readFileSync11, unlinkSync as unlinkSync6, writeFileSync as writeFileSync5 } from "node:fs";
 import { isAbsolute as isAbsolute6, join as join15 } from "node:path";
 import { StringEnum as StringEnum2 } from "@earendil-works/pi-ai";
-import { defineTool as defineTool3, getAgentDir as getAgentDir10, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { defineTool as defineTool4, getAgentDir as getAgentDir10, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container as Container3, Key as Key2, matchesKey as matchesKey9, SettingsList, Spacer, Text as Text6 } from "@earendil-works/pi-tui";
-import { Type as Type7 } from "@sinclair/typebox";
+import { Type as Type8 } from "@sinclair/typebox";
 
 // src/agent-file-toggle.ts
 init_custom_agents();
@@ -8280,19 +8368,19 @@ function clearBackgroundHint(ctx, render = true) {
 __name(clearBackgroundHint, "clearBackgroundHint");
 
 // src/jobs/patty/tools/bash-params.ts
-import { Type as Type3 } from "@earendil-works/pi-ai";
-var bashParamSchema = Type3.Object({
-  command: Type3.String({ description: "Shell command to run" }),
-  timeout: Type3.Optional(
-    Type3.Number({ description: "Timeout in seconds (default: 120)" })
+import { Type as Type4 } from "@earendil-works/pi-ai";
+var bashParamSchema = Type4.Object({
+  command: Type4.String({ description: "Shell command to run" }),
+  timeout: Type4.Optional(
+    Type4.Number({ description: "Timeout in seconds (default: 120)" })
   ),
-  run_in_background: Type3.Optional(
-    Type3.Boolean({
+  run_in_background: Type4.Optional(
+    Type4.Boolean({
       description: "Set to true to run this command in the background immediately. Output is saved to a private temporary log path returned by the tool."
     })
   ),
-  description: Type3.Optional(
-    Type3.String({ description: "Short description of what this command does" })
+  description: Type4.Optional(
+    Type4.String({ description: "Short description of what this command does" })
   )
 });
 
@@ -8526,7 +8614,7 @@ __name(spawnBackground, "spawnBackground");
 
 // src/jobs/patty/tools/bash-bg.ts
 import { appendFileSync as appendFileSync2 } from "node:fs";
-import { Type as Type4 } from "@earendil-works/pi-ai";
+import { Type as Type5 } from "@earendil-works/pi-ai";
 function registerBashBgTool(pi, reg) {
   pi.registerTool({
     name: "bash_bg",
@@ -8539,11 +8627,11 @@ function registerBashBgTool(pi, reg) {
       "For waits, prefer jobs action='attach' or a condition-based monitor when those express the real completion condition; explicit finite sleep commands remain allowed.",
       "Give the job a name when it will be easier to track in jobs list."
     ],
-    parameters: Type4.Object({
-      command: Type4.String({ description: "Command to run" }),
-      name: Type4.Optional(Type4.String({ description: "Label shown in jobs list" })),
-      timeout: Type4.Optional(Type4.Number({ description: "Timeout in seconds" })),
-      notify: Type4.Optional(Type4.Boolean({ description: "Notify on completion (default: true)" }))
+    parameters: Type5.Object({
+      command: Type5.String({ description: "Command to run" }),
+      name: Type5.Optional(Type5.String({ description: "Label shown in jobs list" })),
+      timeout: Type5.Optional(Type5.Number({ description: "Timeout in seconds" })),
+      notify: Type5.Optional(Type5.Boolean({ description: "Notify on completion (default: true)" }))
     }),
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
       const p = params;
@@ -8601,7 +8689,7 @@ function registerBashBgTool(pi, reg) {
 __name(registerBashBgTool, "registerBashBgTool");
 
 // src/jobs/patty/tools/jobs.ts
-import { StringEnum, Type as Type5 } from "@earendil-works/pi-ai";
+import { StringEnum, Type as Type6 } from "@earendil-works/pi-ai";
 
 // src/jobs/patty/log-search.ts
 import { createReadStream } from "node:fs";
@@ -8690,7 +8778,7 @@ function registerJobsTool(pi, reg) {
       "stats: show aggregate metrics",
       "Completion notices are informational \u2014 call 'output' on a FAILED job, or on any job whose output is the deliverable (e.g. a test/build you must report). Don't call it just to acknowledge a completed job."
     ],
-    parameters: Type5.Object({
+    parameters: Type6.Object({
       action: StringEnum(
         [
           "list",
@@ -8703,12 +8791,12 @@ function registerJobsTool(pi, reg) {
         ],
         { description: "Action to perform" }
       ),
-      jobId: Type5.Optional(Type5.String({ description: "Job ID" })),
-      pattern: Type5.Optional(
-        Type5.String({ description: "Regex pattern for search" })
+      jobId: Type6.Optional(Type6.String({ description: "Job ID" })),
+      pattern: Type6.Optional(
+        Type6.String({ description: "Regex pattern for search" })
       ),
-      wait: Type5.Optional(
-        Type5.Boolean({
+      wait: Type6.Optional(
+        Type6.Boolean({
           description: "Whether attach should wait for completion (default: true)"
         })
       )
@@ -8942,7 +9030,7 @@ function statsAction(reg) {
 __name(statsAction, "statsAction");
 
 // src/jobs/patty/tools/monitor.ts
-import { Type as Type6 } from "@earendil-works/pi-ai";
+import { Type as Type7 } from "@earendil-works/pi-ai";
 
 // src/jobs/patty/monitor-follow.ts
 import { closeSync as closeSync6, openSync as openSync6, readSync as readSync3, statSync as statSync6 } from "node:fs";
@@ -9461,25 +9549,25 @@ function registerMonitorTool(pi, reg) {
       "Use persistent:true for session-length watches (PR monitoring, log tails); stop it with the jobs tool (action='kill').",
       "Use the ws source for a WebSocket feed instead of `command: 'websocat \u2026'` \u2014 each text frame becomes one event."
     ],
-    parameters: Type6.Object({
-      command: Type6.Optional(
-        Type6.String({ description: `${shell} script; each stdout line is an event. Mutually exclusive with ws.` })
+    parameters: Type7.Object({
+      command: Type7.Optional(
+        Type7.String({ description: `${shell} script; each stdout line is an event. Mutually exclusive with ws.` })
       ),
-      ws: Type6.Optional(
-        Type6.Object(
+      ws: Type7.Optional(
+        Type7.Object(
           {
-            url: Type6.String({ description: "WebSocket URL (ws:// or wss://)" }),
-            protocols: Type6.Optional(Type6.Array(Type6.String()))
+            url: Type7.String({ description: "WebSocket URL (ws:// or wss://)" }),
+            protocols: Type7.Optional(Type7.Array(Type7.String()))
           },
           { description: "WebSocket source; each text frame is an event. Mutually exclusive with command." }
         )
       ),
-      description: Type6.String({ description: "Specific description, shown on every notification." }),
-      persistent: Type6.Optional(
-        Type6.Boolean({ description: "Run for the whole session (no timeout). Stop via jobs action='kill'. Default false." })
+      description: Type7.String({ description: "Specific description, shown on every notification." }),
+      persistent: Type7.Optional(
+        Type7.Boolean({ description: "Run for the whole session (no timeout). Stop via jobs action='kill'. Default false." })
       ),
-      timeout_ms: Type6.Optional(
-        Type6.Number({ description: "Kill after this deadline (default 300000, max 3600000). Ignored when persistent." })
+      timeout_ms: Type7.Optional(
+        Type7.Number({ description: "Kill after this deadline (default 300000, max 3600000). Ignored when persistent." })
       )
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -17090,8 +17178,8 @@ Type: ${record2.type}
     (event, payload) => pi.events.emit(event, payload)
   );
   const scheduleParamShape = {
-    schedule: Type7.Optional(
-      Type7.String({
+    schedule: Type8.Optional(
+      Type8.String({
         description: 'Opt-in only \u2014 fire later instead of now. Omit to run immediately (the default, almost always correct). Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.'
       })
     )
@@ -17196,7 +17284,7 @@ Terse command-style prompts produce shallow, generic work.
     }
     return fullAgentToolDescription;
   })();
-  const agentTool = defineTool3({
+  const agentTool = defineTool4({
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
     description: agentToolDescription,
@@ -17205,57 +17293,58 @@ Terse command-style prompts produce shallow, generic work.
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing \u2014 if you delegate research to a subagent, do not also perform the same searches yourself.",
       "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
       "When an agent runs in the background, you will be notified on completion \u2014 do not poll or sleep waiting for it by default. Use get_subagent_activity or watch_subagent only for explicit opt-in parent supervision.",
+      "Subagents can send interim findings and decision requests through send_parent_message without completing. Review the evidence and reply with steer_subagent while the child is running, or Agent(resume) if it has returned; an interim message is not a completed result.",
       "Parent supervision corrects direction, scope, or acceptance\u2014not recoverable detail mistakes. Leave edit-match, build, type, or test failures to the child when it is adapting; steer on evidence of drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. Silence or one error is not enough; state evidence and the desired boundary, not micromanaged steps.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done."
     ],
-    parameters: Type7.Object({
-      prompt: Type7.String({
+    parameters: Type8.Object({
+      prompt: Type8.String({
         description: "The task for the agent to perform."
       }),
-      description: Type7.String({
+      description: Type8.String({
         description: "A short (3-5 word) description of the task (shown in UI)."
       }),
-      name: Type7.Optional(
-        Type7.String({
+      name: Type8.Optional(
+        Type8.String({
           description: 'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.'
         })
       ),
-      subagent_type: Type7.String({
+      subagent_type: Type8.String({
         description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir10()}/agents/*.md (global) are also available.`
       }),
-      model: Type7.Optional(
-        Type7.String({
+      model: Type8.Optional(
+        Type8.String({
           description: `Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type's default.`
         })
       ),
-      thinking: Type7.Optional(
-        Type7.String({
+      thinking: Type8.Optional(
+        Type8.String({
           description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`
         })
       ),
-      max_turns: Type7.Optional(
-        Type7.Number({
+      max_turns: Type8.Optional(
+        Type8.Number({
           description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
           minimum: 1
         })
       ),
-      run_in_background: Type7.Optional(
-        Type7.Boolean({
+      run_in_background: Type8.Optional(
+        Type8.Boolean({
           description: "Defaults to true \u2014 the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline."
         })
       ),
-      resume: Type7.Optional(
-        Type7.String({
+      resume: Type8.Optional(
+        Type8.String({
           description: "Original agent ID to resume, including after Pi restarts into the same parent session when its child session was persisted. Keeps the original identity and saved conversation; subagent_type and model/isolation overrides are ignored. Missing or invalid saved state is an error, never a fresh spawn. Resumes detached by default; pass run_in_background: false to block. A running agent cannot be resumed \u2014 use steer_subagent instead."
         })
       ),
-      isolated: Type7.Optional(
-        Type7.Boolean({
+      isolated: Type8.Optional(
+        Type8.Boolean({
           description: "If true, agent gets no extension/MCP tools \u2014 only built-in tools."
         })
       ),
-      inherit_context: Type7.Optional(
-        Type7.Boolean({
+      inherit_context: Type8.Optional(
+        Type8.Boolean({
           description: "If true, fork parent conversation into the agent. Default: false (fresh context)."
         })
       ),
@@ -17749,7 +17838,7 @@ Do not duplicate this agent's work.`,
     });
   }
   __name(notifyWorkflowFinished, "notifyWorkflowFinished");
-  const workflowTool = defineTool3({
+  const workflowTool = defineTool4({
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
     description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
@@ -17759,30 +17848,30 @@ Do not duplicate this agent's work.`,
       "Prefer `pipeline` over `parallel` \u2014 a barrier costs wall-clock whenever the stages are unevenly sized.",
       "A workflow runs in the background and notifies you when it finishes \u2014 do not poll or sleep waiting for it."
     ],
-    parameters: Type7.Object({
-      script: Type7.Optional(
-        Type7.String({
+    parameters: Type8.Object({
+      script: Type8.Optional(
+        Type8.String({
           maxLength: 524288,
           description: "Inline workflow source. Must begin with `export const meta = { name, description }`."
         })
       ),
-      scriptPath: Type7.Optional(
-        Type7.String({
+      scriptPath: Type8.Optional(
+        Type8.String({
           description: "Path to a workflow script file, absolute or relative to the project. Takes precedence over `script` \u2014 this is how you re-run an edited workflow."
         })
       ),
-      name: Type7.Optional(
-        Type7.String({
+      name: Type8.Optional(
+        Type8.String({
           description: "Name of a saved workflow \u2014 `<name>.js` in .pi/workflows/, .agents/workflows/ or the user's agent dir. Lowest precedence: `scriptPath` and `script` both win over it."
         })
       ),
-      args: Type7.Optional(
-        Type7.Any({
+      args: Type8.Optional(
+        Type8.Any({
           description: "Exposed to the script as the global `args`, verbatim. Must be JSON-shaped."
         })
       ),
-      resumeFromRunId: Type7.Optional(
-        Type7.String({
+      resumeFromRunId: Type8.Optional(
+        Type8.String({
           pattern: "^wf_[a-z0-9-]{6,}$",
           description: "Run id of an earlier workflow in this session. Its unchanged leading agent() calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live. Same script and args means nothing re-runs."
         })
@@ -17791,11 +17880,11 @@ Do not duplicate this agent's work.`,
       // every other tool has them, and a hard schema rejection would cost a
       // whole turn to re-emit a script that was already correct. The `meta`
       // block is the one place a workflow is named.
-      title: Type7.Optional(
-        Type7.String({ description: "Ignored \u2014 set the workflow title in the script's `meta` block." })
+      title: Type8.Optional(
+        Type8.String({ description: "Ignored \u2014 set the workflow title in the script's `meta` block." })
       ),
-      description: Type7.Optional(
-        Type7.String({ description: "Ignored \u2014 set the workflow description in the script's `meta` block." })
+      description: Type8.Optional(
+        Type8.String({ description: "Ignored \u2014 set the workflow description in the script's `meta` block." })
       )
     }),
     renderCall(args, theme) {
@@ -17974,22 +18063,22 @@ To iterate, edit the script file and call SubagentWorkflow again with scriptPath
     });
   }
   __name(runWorkflowFlag, "runWorkflowFlag");
-  registerToolReportingUsage(defineTool3({
+  registerToolReportingUsage(defineTool4({
     name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description: "Check status and retrieve a background agent's full result \u2014 its completion notification carries only a preview. Use the agent ID returned by Agent.",
     promptSnippet: "Check status and retrieve results from a background agent",
-    parameters: Type7.Object({
-      agent_id: Type7.String({
+    parameters: Type8.Object({
+      agent_id: Type8.String({
         description: "The agent ID to check. The agent's handle also works \u2014 its `name` if you gave it one, otherwise its type (`explore`, `explore-2`)."
       }),
-      wait: Type7.Optional(
-        Type7.Boolean({
-          description: "If true, wait for the agent to complete before returning. Default: false."
+      wait: Type8.Optional(
+        Type8.Boolean({
+          description: "If true, wait for completion or an interim child message that needs parent attention. An interim message returns while the agent remains running. Default: false."
         })
       ),
-      verbose: Type7.Optional(
-        Type7.Boolean({
+      verbose: Type8.Optional(
+        Type8.Boolean({
           description: "If true, include the agent's full conversation (messages + tool calls). Default: false."
         })
       )
@@ -17999,7 +18088,7 @@ To iterate, edit the script file and call SubagentWorkflow again with scriptPath
       if (!record2 || !isTopLevelAgent(record2)) {
         return textResult2(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
-      if (params.wait) await manager.waitForTerminal(record2, signal);
+      if (params.wait) await manager.waitForTerminal(record2, signal, true);
       const displayName = getDisplayName(record2.type);
       const duration = formatDuration2(record2.startedAt, record2.completedAt);
       const tokens = formatLifetimeTokens(record2);
@@ -18019,7 +18108,7 @@ Description: ${record2.description}
 
 `;
       if (record2.status === "running") {
-        output += "Agent is still running. Use wait: true or check back later.";
+        output += "Agent is still running. Process any interim messages and use steer_subagent to reply; its final result remains pending.";
       } else if (record2.status === "error") {
         output += `Error: ${record2.error}${partialOutputSuffix(record2)}`;
       } else {
@@ -18042,7 +18131,7 @@ ${conversation}`;
       return textResult2(output);
     }, "execute")
   }));
-  registerToolReportingUsage(defineTool3({
+  registerToolReportingUsage(defineTool4({
     name: "get_subagent_activity",
     label: "Get Agent Activity",
     description: "Read bounded recent or incremental public activity from a top-level subagent without consuming its result. Returns text, tool-call argument excerpts, and tool-result excerpts; thinking and image/base64 data are excluded.",
@@ -18051,16 +18140,16 @@ ${conversation}`;
       "Use get_subagent_activity only for explicit parent supervision. Treat excerpts as an observation opportunity, not a mandate to steer; compare them with the child\u2019s original scope, objective, and acceptance criteria.",
       "The child self-heals recoverable detail mistakes while adapting. Silence or one edit-match, build, type, or test error is not enough; steer for direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary, not micromanaged steps."
     ],
-    parameters: Type7.Object({
-      agent_id: Type7.String({
+    parameters: Type8.Object({
+      agent_id: Type8.String({
         description: "The top-level agent ID or handle to inspect."
       }),
-      limit: Type7.Optional(Type7.Integer({
+      limit: Type8.Optional(Type8.Integer({
         minimum: 1,
         maximum: MAX_ACTIVITY_LIMIT,
         description: `Maximum public activity events to return (default ${DEFAULT_ACTIVITY_LIMIT}, maximum ${MAX_ACTIVITY_LIMIT}).`
       })),
-      cursor: Type7.Optional(Type7.String({
+      cursor: Type8.Optional(Type8.String({
         maxLength: 2048,
         description: "Opaque cursor from a previous get_subagent_activity response. Omit for the current retained transcript."
       }))
@@ -18085,7 +18174,7 @@ ${conversation}`;
 ${formatActivityPage(page)}`);
     }, "execute")
   }));
-  registerToolReportingUsage(defineTool3({
+  registerToolReportingUsage(defineTool4({
     name: "get_subagent_activity_detail",
     label: "Get Agent Activity Detail",
     description: "Read one paginated public transcript message selected by an activity ID, without consuming a result or changing activity/watch cursors. Tool arguments, tool results, and public error metadata are included; thinking, images, and base64 are excluded.",
@@ -18094,20 +18183,20 @@ ${formatActivityPage(page)}`);
       "Use get_subagent_activity_detail only after get_subagent_activity returned an activity ID and only for explicit parent supervision. It reads one bounded public message; it does not consume the child result or move a watch.",
       "Treat detail as an observation opportunity, not a mandate to steer. The parent corrects direction, scope, or acceptance; the child self-heals recoverable detail mistakes. Silence or one error is not enough; steer on evidence such as drift, repeated ineffective attempts without new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action, and state the desired boundary."
     ],
-    parameters: Type7.Object({
-      agent_id: Type7.String({
+    parameters: Type8.Object({
+      agent_id: Type8.String({
         description: "The top-level agent ID or handle that produced the activity ID."
       }),
-      activity_id: Type7.String({
+      activity_id: Type8.String({
         maxLength: 512,
         description: "Opaque activity ID returned by get_subagent_activity for this same agent session."
       }),
-      offset: Type7.Optional(Type7.Integer({
+      offset: Type8.Optional(Type8.Integer({
         minimum: 0,
         maximum: MAX_ACTIVITY_DETAIL_CHARS,
         description: `Character offset in this message's bounded public rendering (default 0; maximum ${MAX_ACTIVITY_DETAIL_CHARS}).`
       })),
-      limit: Type7.Optional(Type7.Integer({
+      limit: Type8.Optional(Type8.Integer({
         minimum: 1,
         maximum: MAX_ACTIVITY_DETAIL_LIMIT,
         description: `Characters to return (default ${DEFAULT_ACTIVITY_DETAIL_LIMIT}; maximum ${MAX_ACTIVITY_DETAIL_LIMIT}).`
@@ -18134,7 +18223,7 @@ ${formatActivityPage(page)}`);
 ${formatActivityDetailPage(page)}`);
     }, "execute")
   }));
-  registerToolReportingUsage(defineTool3({
+  registerToolReportingUsage(defineTool4({
     name: "watch_subagent",
     label: "Watch Agent",
     description: "Opt in to, stop, or inspect session-scoped periodic parent supervision for one top-level background agent. A watch sends bounded combined activity evidence only while the parent is idle; it never declares a silent child stuck.",
@@ -18143,7 +18232,7 @@ ${formatActivityDetailPage(page)}`);
       "Use watch_subagent only for explicit opt-in parent supervision of a top-level background agent. A notification is an observation opportunity, not a mandate to steer: compare untrusted evidence with the child\u2019s original scope, objective, and acceptance criteria.",
       "Let the child self-heal recoverable edit-match, build, type, or test mistakes while adapting. Silence or one error is not enough; intervene for direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary rather than micromanaging steps."
     ],
-    parameters: Type7.Object({
+    parameters: Type8.Object({
       // pi-ai's StringEnum is required for Google-compatible enum schemas;
       // this extension still builds its surrounding Type.Object with the host's
       // legacy @sinclair TypeBox package, so bridge the structurally identical
@@ -18151,19 +18240,19 @@ ${formatActivityDetailPage(page)}`);
       action: StringEnum2(["start", "stop", "status"], {
         description: "start a watch, stop one, or return its current status."
       }),
-      agent_id: Type7.String({
+      agent_id: Type8.String({
         description: "The top-level background agent ID or handle to watch."
       }),
-      interval_seconds: Type7.Optional(Type7.Integer({
+      interval_seconds: Type8.Optional(Type8.Integer({
         minimum: MIN_WATCH_INTERVAL_SECONDS,
         maximum: MAX_WATCH_INTERVAL_SECONDS,
         description: `Periodic interval in seconds (default ${DEFAULT_WATCH_INTERVAL_SECONDS}; ${MIN_WATCH_INTERVAL_SECONDS}-${MAX_WATCH_INTERVAL_SECONDS}).`
       })),
-      review_brief: Type7.Optional(Type7.String({
+      review_brief: Type8.Optional(Type8.String({
         maxLength: 500,
         description: "Optional bounded review focus included with evidence notifications."
       })),
-      criteria: Type7.Optional(Type7.String({
+      criteria: Type8.Optional(Type8.String({
         maxLength: 500,
         description: "Optional bounded correction criteria included with evidence notifications."
       }))
@@ -18196,7 +18285,7 @@ ${formatActivityDetailPage(page)}`);
       );
     }, "execute")
   }));
-  registerToolReportingUsage(defineTool3({
+  registerToolReportingUsage(defineTool4({
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description: "Send a steering message to a running agent. Use this for a direct user-requested steer or an evidence-based supervision correction; the parent corrects direction, scope, or acceptance while the child self-heals recoverable detail mistakes. State evidence and the desired boundary, not micromanaged steps. The message interrupts the agent after its current tool execution and is injected into its conversation. Only works on running agents.",
@@ -18205,11 +18294,11 @@ ${formatActivityDetailPage(page)}`);
       "Direct user-requested steering is normal. For supervision corrections, steer only on evidence of direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action; silence or one recoverable error is not enough.",
       "Leave recoverable edit-match, build, type, and test failures to the child when it is adapting and self-healing. State the evidence and desired boundary, not a micromanaged sequence of steps."
     ],
-    parameters: Type7.Object({
-      agent_id: Type7.String({
+    parameters: Type8.Object({
+      agent_id: Type8.String({
         description: "The agent ID to steer (must be currently running). The agent's handle also works \u2014 its `name` if you gave it one, otherwise its type (`explore`, `explore-2`)."
       }),
-      message: Type7.String({
+      message: Type8.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation."
       })
     }),

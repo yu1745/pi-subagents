@@ -1767,6 +1767,7 @@ Terse command-style prompts produce shallow, generic work.
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
       "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
       "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it by default. Use get_subagent_activity or watch_subagent only for explicit opt-in parent supervision.",
+      "Subagents can send interim findings and decision requests through send_parent_message without completing. Review the evidence and reply with steer_subagent while the child is running, or Agent(resume) if it has returned; an interim message is not a completed result.",
       "Parent supervision corrects direction, scope, or acceptance—not recoverable detail mistakes. Leave edit-match, build, type, or test failures to the child when it is adapting; steer on evidence of drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. Silence or one error is not enough; state evidence and the desired boundary, not micromanaged steps.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
@@ -2864,7 +2865,7 @@ Terse command-style prompts produce shallow, generic work.
       }),
       wait: Type.Optional(
         Type.Boolean({
-          description: "If true, wait for the agent to complete before returning. Default: false.",
+          description: "If true, wait for completion or an interim child message that needs parent attention. An interim message returns while the agent remains running. Default: false.",
         }),
       ),
       verbose: Type.Optional(
@@ -2882,7 +2883,7 @@ Terse command-style prompts produce shallow, generic work.
       // Wait for completion if requested. Cancellation stops only this tool
       // call; the background agent keeps running and remains unconsumed so its
       // completion notification can still be delivered.
-      if (params.wait) await manager.waitForTerminal(record, signal);
+      if (params.wait) await manager.waitForTerminal(record, signal, true);
 
       const displayName = getDisplayName(record.type);
       const duration = formatDuration(record.startedAt, record.completedAt);
@@ -2904,7 +2905,7 @@ Terse command-style prompts produce shallow, generic work.
         `Description: ${record.description}\n\n`;
 
       if (record.status === "running") {
-        output += "Agent is still running. Use wait: true or check back later.";
+        output += "Agent is still running. Process any interim messages and use steer_subagent to reply; its final result remains pending.";
       } else if (record.status === "error") {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
       } else {

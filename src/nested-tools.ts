@@ -77,7 +77,7 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
-  waitForTerminal(record: AgentRecord, signal?: AbortSignal): Promise<void>;
+  waitForTerminal(record: AgentRecord, signal?: AbortSignal, wakeOnMessage?: boolean): Promise<void>;
   resolveAgentRef(ref: string, parentAgentId?: string): AgentRecord | undefined;
   resume(id: string, prompt: string, signal?: AbortSignal, options?: { maxTurns?: number }): Promise<AgentRecord | undefined>;
 }
@@ -350,7 +350,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
       // Cancellation affects only collection, never the owned child.
-      if (params.wait) await context.manager.waitForTerminal(record, signal);
+      if (params.wait) await context.manager.waitForTerminal(record, signal, true);
       if (record.status !== "queued" && record.status !== "running") record.resultConsumed = true;
       return textResult(formatRecord(record, "fetched"), record.status === "error");
     },

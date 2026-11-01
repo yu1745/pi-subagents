@@ -424,7 +424,7 @@ exclude_extensions: pi-notify     # everything except pi-notify (with extensions
 extensions: [mcp]
 tools: "*, ext:mcp/search"
 
-isolated: true                    # hermetic: built-ins only, no extensions/skills/context
+isolated: true                    # no extensions/skills/context; native parent messaging remains available
 ```
 
 A few rules the examples don't make obvious:
@@ -561,10 +561,12 @@ Check status and retrieve results from a background agent.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID, handle, or unique ID prefix (at least 8 characters) |
-| `wait` | boolean | no | Wait for completion |
+| `wait` | boolean | no | Wait for completion or an interim child message |
 | `verbose` | boolean | no | Include full conversation log |
 
 Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally. Waiting covers queueing and asynchronous startup, including worktree creation. Terminal results remain queryable even after consumption and SDK memory cleanup.
+
+A child's interim message also releases result waits for that parent, including parallel sibling waits, so the parent can read the report and reply while the child continues. A running result remains unconsumed; normal completion notification still applies.
 
 Result, steering, activity and watch tools accept exact IDs or handles first, then unique ID prefixes of at least eight characters; ambiguous prefixes fail explicitly. Nested result and steering lookups remain ownership-scoped.
 
@@ -578,6 +580,16 @@ Send a steering message to a running agent. Direct user-requested steering is no
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID, handle, or unique ID prefix (at least 8 characters) |
 | `message` | string | yes | Message to inject into agent conversation |
+
+### `send_parent_message`
+
+Available inside managed subagents: send an interim finding or decision request to the immediate parent without ending the task. The parent receives the sender's identity and message through steering delivery; an idle root parent starts a turn. The acknowledgement means queued, not read. Nested reports go only to their direct parent. The parent can reply through `steer_subagent`; final results keep their normal return format and completion notification.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `message` | string | yes | Important finding or decision request, with evidence and the next action |
+
+The tool description and child system prompt encourage reports when a finding changes the plan, a blocker needs a decision, or scope needs changing; children continue independent work while awaiting guidance. There is no periodic reporting requirement. This native communication bridge works with recursion disabled, `extensions: false`, or `isolated: true`; `disallowed_tools: send_parent_message` removes both the tool and its prompt guidance. Foreground `Agent` calls still return at task completion; interim reports release `get_subagent_result(wait: true)` waits.
 
 ### `watch_subagent`
 
