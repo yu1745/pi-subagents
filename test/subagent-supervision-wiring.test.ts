@@ -46,32 +46,17 @@ beforeEach(() => {
 });
 
 describe("parent supervision tool wiring", () => {
-  it("registers directional supervision policy and distinguishes direct steering", async () => {
+  it("keeps supervision policy on Agent and operation details on the other tools", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
 
     const guidelines = (name: string) => (tools.get(name) as { promptGuidelines?: string[] }).promptGuidelines?.join("\n") ?? "";
-    const activityPolicy = guidelines("get_subagent_activity");
-    const detailPolicy = guidelines("get_subagent_activity_detail");
-    const watchPolicy = guidelines("watch_subagent");
-    const steer = tools.get("steer_subagent") as { description: string; promptGuidelines?: string[] };
-
-    for (const policy of [activityPolicy, detailPolicy, watchPolicy]) {
-      expect(policy).toContain("observation opportunity");
-      expect(policy).toContain("direction, scope, or acceptance");
-      expect(policy).toContain("self-heal");
-      expect(policy.toLowerCase()).toContain("silence");
-      expect(policy).toContain("desired boundary");
-    }
-    const steerPolicy = steer.promptGuidelines?.join("\n") ?? "";
-    expect(steerPolicy).toContain("Direct user-requested steering is normal");
-    expect(steerPolicy).toContain("direction, scope, or acceptance");
-    expect(steerPolicy).toContain("self-heal");
-    expect(steerPolicy).toContain("silence");
-    expect(steerPolicy).toContain("desired boundary");
-    expect(steer.description).toContain("direct user-requested steer");
-    expect(steer.description).toContain("evidence-based supervision correction");
-    expect(steer.description).toContain("micromanaged steps");
+    expect(guidelines("Agent")).toContain("continue useful independent work");
+    expect(guidelines("Agent")).toContain("direction, scope, or acceptance");
+    const operationGuidelines = ["get_subagent_activity", "get_subagent_activity_detail", "watch_subagent", "steer_subagent"].map(guidelines).join("\n");
+    expect(operationGuidelines).not.toMatch(/recoverable|only for explicit|direction, scope, or acceptance/);
+    expect(guidelines("watch_subagent")).toContain("a blocking get_subagent_result(wait: true) defers them");
+    expect(guidelines("get_subagent_activity_detail")).toContain("activity ID returned by get_subagent_activity");
 
     await lifecycle.get("session_shutdown")?.({}, ctx());
   });

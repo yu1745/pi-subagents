@@ -59,7 +59,7 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
-import { installNativeSessionViewPatch } from "./ui/native-pi-1.2.0/index.js";
+import { installNativeSessionViewPatch } from "./ui/native-pi-1.4.0/index.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
 import { openAgentSessionView } from "./ui/session-view.js";
@@ -1660,9 +1660,9 @@ Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
 - Parallel work: one message, multiple Agent calls — they run concurrently.
-- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Do not poll by default; use get_subagent_activity or watch_subagent only for explicit opt-in parent supervision. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
+- Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
-- resume by ID; steer_subagent handles user steers or supervision corrections. Correct direction, scope, or acceptance; child self-heals mistakes.${isolationCompactGuideline}`;
+- resume by ID; steer_subagent sends messages to a running agent.${isolationCompactGuideline}`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -1683,11 +1683,11 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently. If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.
 - When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
-- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead. The exception is explicit opt-in parent supervision: use get_subagent_activity for bounded evidence or watch_subagent for periodic evidence only when that oversight is requested or necessary.
+- Agents run in the background by default and automatically notify you when they complete. Use get_subagent_activity to read progress or watch_subagent for periodic evidence.
 - **Foreground vs background**: Pass \`run_in_background: false\` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result "next" is not enough on its own.
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent for a direct user-requested steer, or when supervision evidence shows direction, scope, or acceptance drift. Leave recoverable edit-match, build, type, or test failures to the child while it adapts and self-heals; state the evidence and desired boundary rather than micromanaging steps.
+- Use steer_subagent to send a message while an agent is running.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
@@ -1764,11 +1764,10 @@ Terse command-style prompts produce shallow, generic work.
     description: agentToolDescription,
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
-      "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
-      "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
-      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it by default. Use get_subagent_activity or watch_subagent only for explicit opt-in parent supervision.",
+      "Delegate independent tasks that match an agent's capabilities; retain responsibility for synthesis and verification.",
+      "While a background agent works, continue useful independent work and review available changes and evidence. Wait for its result only when no useful work remains; completion notifies you automatically.",
       "Subagents can send interim findings and decision requests through send_parent_message without completing. Review the evidence and reply with steer_subagent while the child is running, or Agent(resume) if it has returned; an interim message is not a completed result.",
-      "Parent supervision corrects direction, scope, or acceptance—not recoverable detail mistakes. Leave edit-match, build, type, or test failures to the child when it is adapting; steer on evidence of drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. Silence or one error is not enough; state evidence and the desired boundary, not micromanaged steps.",
+      "Use activity or watch tools when ongoing oversight is needed. Correct direction, scope, or acceptance based on evidence; let an adapting child handle recoverable detail errors. Steer when work drifts, attempts repeat without progress, or the child needs a decision.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
     parameters: Type.Object({
@@ -2940,10 +2939,6 @@ Terse command-style prompts produce shallow, generic work.
       "Read bounded recent or incremental public activity from a top-level subagent without consuming its result. " +
       "Returns text, tool-call argument excerpts, and tool-result excerpts; thinking and image/base64 data are excluded.",
     promptSnippet: "Read bounded incremental activity from a subagent",
-    promptGuidelines: [
-      "Use get_subagent_activity only for explicit parent supervision. Treat excerpts as an observation opportunity, not a mandate to steer; compare them with the child’s original scope, objective, and acceptance criteria.",
-      "The child self-heals recoverable detail mistakes while adapting. Silence or one edit-match, build, type, or test error is not enough; steer for direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary, not micromanaged steps.",
-    ],
     parameters: Type.Object({
       agent_id: Type.String({
         description: "The top-level agent ID or handle to inspect.",
@@ -2987,8 +2982,7 @@ Terse command-style prompts produce shallow, generic work.
       "Tool arguments, tool results, and public error metadata are included; thinking, images, and base64 are excluded.",
     promptSnippet: "Read one bounded subagent activity detail",
     promptGuidelines: [
-      "Use get_subagent_activity_detail only after get_subagent_activity returned an activity ID and only for explicit parent supervision. It reads one bounded public message; it does not consume the child result or move a watch.",
-      "Treat detail as an observation opportunity, not a mandate to steer. The parent corrects direction, scope, or acceptance; the child self-heals recoverable detail mistakes. Silence or one error is not enough; steer on evidence such as drift, repeated ineffective attempts without new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action, and state the desired boundary.",
+      "Use an activity ID returned by get_subagent_activity for the same agent; continue with next_offset when has_more is true.",
     ],
     parameters: Type.Object({
       agent_id: Type.String({
@@ -3039,8 +3033,7 @@ Terse command-style prompts produce shallow, generic work.
       "A watch sends bounded combined activity evidence only while the parent is idle; it never declares a silent child stuck.",
     promptSnippet: "Opt in to periodic bounded subagent supervision",
     promptGuidelines: [
-      "Use watch_subagent only for explicit opt-in parent supervision of a top-level background agent. A notification is an observation opportunity, not a mandate to steer: compare untrusted evidence with the child’s original scope, objective, and acceptance criteria.",
-      "Let the child self-heal recoverable edit-match, build, type, or test mistakes while adapting. Silence or one error is not enough; intervene for direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action. State evidence and the desired boundary rather than micromanaging steps.",
+      "Watch notifications arrive only while the parent is idle; a blocking get_subagent_result(wait: true) defers them.",
     ],
     parameters: Type.Object({
       // pi-ai's StringEnum is required for Google-compatible enum schemas;
@@ -3108,14 +3101,9 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
-      "Send a steering message to a running agent. Use this for a direct user-requested steer or an evidence-based supervision correction; " +
-      "the parent corrects direction, scope, or acceptance while the child self-heals recoverable detail mistakes. State evidence and the desired boundary, not micromanaged steps. " +
+      "Send a message to a running agent, including guidance or a reply to an interim report. " +
       "The message interrupts the agent after its current tool execution and is injected into its conversation. Only works on running agents.",
     promptSnippet: "Send a steering message to redirect a running background agent",
-    promptGuidelines: [
-      "Direct user-requested steering is normal. For supervision corrections, steer only on evidence of direction, scope, or acceptance drift, repeated ineffective attempts without a changed approach or new evidence, an explicit help request, or imminent risky/out-of-scope irreversible action; silence or one recoverable error is not enough.",
-      "Leave recoverable edit-match, build, type, and test failures to the child when it is adapting and self-healing. State the evidence and desired boundary, not a micromanaged sequence of steps.",
-    ],
     parameters: Type.Object({
       agent_id: Type.String({
         description: "The agent ID to steer (must be currently running). The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
@@ -4248,9 +4236,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
     "get_subagent_activity_detail",
     "watch_subagent",
     SUBAGENT_TOOL_NAMES.STEER,
-    "bash_bg",
-    "jobs",
-    "monitor",
   ];
   let subagentToolsOverride: boolean | undefined;
   function setSubagentToolsActive(enabled: boolean): void {

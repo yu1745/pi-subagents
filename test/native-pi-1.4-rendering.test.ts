@@ -9,15 +9,15 @@ import {
 import { stripTerminalSequences, Text, TuiAltScreen } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { installNativeSessionViewPatch } from "../src/ui/native-pi-1.2.0/index.js";
-import { NativeTranscript } from "../src/ui/native-pi-1.2.0/native-transcript.js";
-import { installSessionViewTracking, subscribeSessionView } from "../src/ui/native-pi-1.2.0/session-snapshot.js";
+import { installNativeSessionViewPatch } from "../src/ui/native-pi-1.4.0/index.js";
+import { NativeTranscript } from "../src/ui/native-pi-1.4.0/native-transcript.js";
+import { installSessionViewTracking, subscribeSessionView } from "../src/ui/native-pi-1.4.0/session-snapshot.js";
 import { fauxModelBackend } from "./helpers/faux-model-backend.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 
 beforeAll(() => initTheme("dark"));
 
-describe("Pi 1.2 native tool rendering contracts", () => {
+describe("Pi 1.4 native tool rendering contracts", () => {
   it.each([0, 1, 3].flatMap(padding => ["live", "snapshot", "persisted"].flatMap(source =>
     ["render_probe", "unknown_probe"].map(name => ({ padding, source, name })),
   )))("preserves resolver, configured padding $padding and duration for $source $name", async ({ padding, source, name }) => {
@@ -97,7 +97,7 @@ describe("Pi 1.2 native tool rendering contracts", () => {
         transcript.handleEvent(end);
       }
       const lines = transcript.container.render(80).map(line => stripTerminalSequences(line).trimEnd());
-      // Pi 1.2 accepts outputPad 0/1 only: a configured 3 normalizes to 1.
+      // Pi 1.4 accepts outputPad 0/1 only: a configured 3 normalizes to 1.
       // Preserve the host's effective setting rather than inventing plugin padding.
       const effectivePadding = padding === 0 ? 0 : 1;
       expect(session.settingsManager.getOutputPad()).toBe(effectivePadding);
@@ -116,13 +116,13 @@ describe("Pi 1.2 native tool rendering contracts", () => {
     }
   });
 
-  it("installs on the real 1.2.0 runtime and restores the hooks it wraps", () => {
+  it("installs on the real 1.4.0 runtime and restores the hooks it wraps", () => {
     // The coupling this fork maintains: the installed Pi must still expose every
     // hook and private method the patch depends on, unchanged in shape.
     const hooks = ["createExtensionUIContext", "resetExtensionUI", "shutdown", "stop", "switchTuiMode"];
     const prototype = InteractiveMode.prototype as unknown as Record<string, unknown>;
     const before = hooks.map(name => [name, Object.getOwnPropertyDescriptor(prototype, name)] as const);
-    expect(VERSION).toBe("1.2.0");
+    expect(VERSION).toBe("1.4.0");
     const patch = installNativeSessionViewPatch();
     try {
       expect(patch.supported).toBe(true);

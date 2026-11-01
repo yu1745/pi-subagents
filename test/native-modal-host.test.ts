@@ -1,8 +1,8 @@
 import { type Component, Container, CURSOR_MARKER, getCapabilities, Image, renderFakeCursor, ScrollView, setCapabilities, setCellDimensions, type Terminal, Text, TuiAltScreen, TuiMainScreen, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { installModalHost120 as installModalHost } from "../src/ui/native-pi-1.2.0/modal-host.js";
+import { installModalHost140 as installModalHost } from "../src/ui/native-pi-1.4.0/modal-host.js";
 
-/** Pi 1.2 emits the drawn cursor as zero-width APC markers that only TUI resolution may paint. */
+/** Pi 1.4 emits the drawn cursor as zero-width APC markers that only TUI resolution may paint. */
 const FAKE_CURSOR_START = "\u001b_pi:fc\u0007";
 
 class FakeTerminal implements Terminal {

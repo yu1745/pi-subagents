@@ -44,6 +44,7 @@ describe("recursion command and persistent settings wiring", () => {
   };
 
   beforeEach(async () => {
+    vi.stubEnv("PI_SUBAGENTS_JOB_RUNTIME", "1");
     dir = mkdtempSync(join(tmpdir(), "recursion-wiring-"));
     previousCwd = process.cwd();
     previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -74,6 +75,7 @@ describe("recursion command and persistent settings wiring", () => {
 
   afterEach(async () => {
     await host?.emit("session_shutdown");
+    vi.unstubAllEnvs();
     if (previousManager === undefined) Reflect.deleteProperty(globalThis, globalKey);
     else Reflect.set(globalThis, globalKey, previousManager);
     process.chdir(previousCwd);
@@ -100,6 +102,8 @@ describe("recursion command and persistent settings wiring", () => {
 
   it("activates tools from project/user configuration before a request, with false overriding true", async () => {
     const globalFile = join(dir, "global", "subagents.json");
+    active = [...host.tools.keys()];
+    await host.emit("session_start");
     expect(active).not.toContain("Agent");
     for (const [user, project, enabled] of [
       [true, undefined, true], [true, false, false], [false, true, true],
@@ -110,6 +114,7 @@ describe("recursion command and persistent settings wiring", () => {
       await host.emit("session_start");
       expect(active.includes("Agent")).toBe(enabled);
       expect(active.includes("get_subagent_activity")).toBe(enabled);
+      expect(active).toEqual(expect.arrayContaining(["bash", "bash_bg", "jobs", "monitor"]));
     }
   });
 

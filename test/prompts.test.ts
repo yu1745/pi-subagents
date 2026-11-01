@@ -179,7 +179,7 @@ describe("buildAgentPrompt", () => {
     const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
     expect(prompt).toContain("Use the read tool instead of cat");
     expect(prompt).toContain("Use the edit tool instead of sed");
-    expect(prompt).toContain("Use the grep tool instead of");
+    expect(prompt).not.toMatch(/Use the (find|grep) tool instead of/);
   });
 
   it("append mode without parent prompt still has bridge", () => {
