@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Configurable subagent tool visibility.** `subagentToolsEnabled` accepts `true` or `false` (default `false`), with session overrides taking priority over project and user configuration. Project configuration enables tools at startup, including `pi -p`; `/subagent-tools reset` clears the session override.
+
 ### Changed
 - **Nested delegation now uses centralized live policy.** `nestedAgentsEnabled` defaults to `false`; `maxSubagentDepth` defaults to `2` (integer `0..16`, main depth 0). Global/project `subagents.json` and `/agents → Settings` persist the baseline. `/subagent-recursion on|off|depth N|status|reset` supplies session-only overrides with higher priority, cleared at session boundaries. Existing tools and resumed sessions check current policy; lowering/disabling blocks new children without killing existing ones or removing owned retrieval/steer/resume. Enabling/raising exposes scoped tools on the next normal turn refresh. Removed `allowed_subagents` frontmatter and inherited branch-cap snapshots; isolation, denylist, strict enabled-type/model checks, ownership, and RPC capability stripping remain enforced.
 - **Removed the external `agent_bg` tool and its `pi -p` launcher.** Native `Agent` is the delegation path. General shell, `bash_bg`, `jobs`, and `monitor` infrastructure is unchanged; `/subagent-tools` visibility remains independent from recursion policy.

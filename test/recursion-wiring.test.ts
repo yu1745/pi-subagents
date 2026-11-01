@@ -98,6 +98,43 @@ describe("recursion command and persistent settings wiring", () => {
     }
   });
 
+  it("activates tools from project/user configuration before a request, with false overriding true", async () => {
+    const globalFile = join(dir, "global", "subagents.json");
+    expect(active).not.toContain("Agent");
+    for (const [user, project, enabled] of [
+      [true, undefined, true], [true, false, false], [false, true, true],
+      [false, undefined, false], [true, "false", true], [false, "true", false],
+    ] as const) {
+      writeFileSync(globalFile, JSON.stringify({ subagentToolsEnabled: user }));
+      writeFileSync(file(), JSON.stringify({ subagentToolsEnabled: project }));
+      await host.emit("session_start");
+      expect(active.includes("Agent")).toBe(enabled);
+      expect(active.includes("get_subagent_activity")).toBe(enabled);
+    }
+  });
+
+  it("keeps tool command overrides in memory, resets to config, and discards overrides at session start", async () => {
+    const toolsCommand = (args: string) => commands.get("subagent-tools")!.handler(args, context);
+    writeFileSync(file(), JSON.stringify({ subagentToolsEnabled: true }));
+    await host.emit("session_start");
+    const before = readFileSync(file(), "utf8");
+    await toolsCommand("off");
+    expect(active).not.toContain("Agent");
+    await toolsCommand("reset");
+    expect(active).toContain("Agent");
+    await toolsCommand("off");
+    await host.emit("session_start");
+    expect(active).toContain("Agent");
+    writeFileSync(file(), JSON.stringify({ subagentToolsEnabled: false }));
+    await toolsCommand("on");
+    expect(active).toContain("Agent");
+    await toolsCommand("reset");
+    expect(active).not.toContain("Agent");
+    writeFileSync(file(), before);
+    await toolsCommand("off");
+    expect(readFileSync(file(), "utf8")).toBe(before);
+  });
+
   it("commands do not write files, do not toggle main tools, and invalid input is atomic", async () => {
     const before = readFileSync(file(), "utf8");
     expect(active).not.toContain("Agent");
@@ -132,6 +169,8 @@ describe("recursion command and persistent settings wiring", () => {
   });
 
   it("Settings UI persists baseline only, including unrelated saves during overrides", async () => {
+    writeFileSync(file(), JSON.stringify({ nestedAgentsEnabled: false, maxSubagentDepth: 3, subagentToolsEnabled: true }));
+    await commands.get("subagent-tools")!.handler("off", context);
     await command("on"); await command("depth 8");
     const select = vi.fn().mockResolvedValueOnce("Settings").mockResolvedValue(undefined);
     Object.assign(context.ui, {
@@ -141,6 +180,7 @@ describe("recursion command and persistent settings wiring", () => {
         expect(settingsUI.items.find(item => item.id === "nestedAgentsEnabled")?.currentValue).toBe("off");
         expect(settingsUI.items.find(item => item.id === "maxSubagentDepth")?.currentValue).toBe("3");
         settingsUI.change!("showCost", "on");
+        expect(JSON.parse(readFileSync(file(), "utf8")).subagentToolsEnabled).toBe(true);
         expect(JSON.parse(readFileSync(file(), "utf8"))).toMatchObject({ nestedAgentsEnabled: false, maxSubagentDepth: 3 });
         settingsUI.change!("nestedAgentsEnabled", "on");
         settingsUI.change!("maxSubagentDepth", "6");

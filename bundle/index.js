@@ -10420,6 +10420,7 @@ function sanitize(raw) {
   if (!raw || typeof raw !== "object") return {};
   const r = raw;
   const out = {};
+  if (typeof r.subagentToolsEnabled === "boolean") out.subagentToolsEnabled = r.subagentToolsEnabled;
   if (Number.isInteger(r.maxConcurrent) && r.maxConcurrent >= 1 && r.maxConcurrent <= MAX_CONCURRENT_CEILING) {
     out.maxConcurrent = r.maxConcurrent;
   }
@@ -16601,8 +16602,8 @@ Use get_subagent_result for full output.`,
       );
     }
     resolveWorkflowCollisions(ctx);
-    subagentToolsEnabled = false;
-    setSubagentToolsActive(false);
+    subagentToolsOverride = void 0;
+    setSubagentToolsActive(loadSettings(ctx.cwd).subagentToolsEnabled ?? false);
     runWorkflowFlag(ctx);
   });
   const mentionTypes = /* @__PURE__ */ __name(() => getAvailableTypes().map((name) => ({ name, description: getAgentConfig(name)?.description ?? name })), "mentionTypes");
@@ -18695,6 +18696,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
   __name(showManualWizard, "showManualWizard");
   function snapshotSettings() {
     return {
+      // Persist configuration, never the session-only command override.
+      subagentToolsEnabled: loadSettings(currentCtx?.cwd).subagentToolsEnabled,
       maxConcurrent: manager.getMaxConcurrent(),
       // 0 = unlimited, and the default — see SubagentsSettings.
       maxConcurrentForeground: manager.getMaxConcurrentForeground(),
@@ -19148,7 +19151,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     "jobs",
     "monitor"
   ];
-  let subagentToolsEnabled = false;
+  let subagentToolsOverride;
   function setSubagentToolsActive(enabled) {
     let available;
     let current;
@@ -19179,16 +19182,18 @@ Write the file using the write tool. Only write the file, nothing else.`;
     }, "handler")
   });
   pi.registerCommand("subagent-tools", {
-    description: "Enable or disable subagent model tools for this session: /subagent-tools on|off",
+    description: "Session-only subagent model tools: /subagent-tools on|off|reset",
     handler: /* @__PURE__ */ __name(async (args, ctx) => {
       const action = args.trim().toLowerCase();
-      if (action !== "on" && action !== "off") {
-        ctx.ui.notify(`Subagent tools: ${subagentToolsEnabled ? "on" : "off"}. Use /subagent-tools on|off`, "info");
+      if (action !== "on" && action !== "off" && action !== "reset") {
+        const enabled2 = subagentToolsOverride ?? loadSettings(ctx.cwd).subagentToolsEnabled ?? false;
+        ctx.ui.notify(`Subagent tools: ${enabled2 ? "on" : "off"}. Use /subagent-tools on|off|reset`, "info");
         return;
       }
-      subagentToolsEnabled = action === "on";
-      setSubagentToolsActive(subagentToolsEnabled);
-      ctx.ui.notify(`Subagent tools ${action} for this session`, "info");
+      subagentToolsOverride = action === "reset" ? void 0 : action === "on";
+      const enabled = subagentToolsOverride ?? loadSettings(ctx.cwd).subagentToolsEnabled ?? false;
+      setSubagentToolsActive(enabled);
+      ctx.ui.notify(`Subagent tools ${enabled ? "on" : "off"}${action === "reset" ? " from configuration" : " for this session"}`, "info");
     }, "handler")
   });
   pi.registerCommand("agents", {

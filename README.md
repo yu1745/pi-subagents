@@ -729,6 +729,12 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
+**Subagent tools** (`subagentToolsEnabled`, default `false`): accepts `true` or `false`. Priority is session override → project configuration → global configuration → `false`. `/subagent-tools on|off` changes only session memory; `/subagent-tools reset` clears that override and reloads configuration. A new session also clears the override. Put the following in `<cwd>/.pi/subagents.json` to enable tools before the first model request, including `pi -p`:
+
+```json
+{ "subagentToolsEnabled": true }
+```
+
 Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.

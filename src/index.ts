@@ -903,9 +903,9 @@ export default function (pi: ExtensionAPI) {
     // extension factory has run, so this is the earliest point the real value
     // exists. Detached inside — a workflow must not hold up session startup.
     resolveWorkflowCollisions(ctx);
-    // Keep model-facing subagent tools opt-in for each session.
-    subagentToolsEnabled = false;
-    setSubagentToolsActive(false);
+    // Session overrides expire here; project settings override user defaults.
+    subagentToolsOverride = undefined;
+    setSubagentToolsActive(loadSettings(ctx.cwd).subagentToolsEnabled ?? false);
     runWorkflowFlag(ctx);
   });
 
@@ -3723,6 +3723,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
    */
   function snapshotSettings() {
     return {
+      // Persist configuration, never the session-only command override.
+      subagentToolsEnabled: loadSettings(currentCtx?.cwd).subagentToolsEnabled,
       maxConcurrent: manager.getMaxConcurrent(),
       // 0 = unlimited, and the default — see SubagentsSettings.
       maxConcurrentForeground: manager.getMaxConcurrentForeground(),
@@ -4249,7 +4251,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     "jobs",
     "monitor",
   ];
-  let subagentToolsEnabled = false;
+  let subagentToolsOverride: boolean | undefined;
   function setSubagentToolsActive(enabled: boolean): void {
     // Some headless hosts do not expose tool listing until their runtime binds.
     // Match workflow collision handling: visibility cannot fail session startup.
@@ -4283,16 +4285,18 @@ Write the file using the write tool. Only write the file, nothing else.`;
   });
 
   pi.registerCommand("subagent-tools", {
-    description: "Enable or disable subagent model tools for this session: /subagent-tools on|off",
+    description: "Session-only subagent model tools: /subagent-tools on|off|reset",
     handler: async (args, ctx) => {
       const action = args.trim().toLowerCase();
-      if (action !== "on" && action !== "off") {
-        ctx.ui.notify(`Subagent tools: ${subagentToolsEnabled ? "on" : "off"}. Use /subagent-tools on|off`, "info");
+      if (action !== "on" && action !== "off" && action !== "reset") {
+        const enabled = subagentToolsOverride ?? loadSettings(ctx.cwd).subagentToolsEnabled ?? false;
+        ctx.ui.notify(`Subagent tools: ${enabled ? "on" : "off"}. Use /subagent-tools on|off|reset`, "info");
         return;
       }
-      subagentToolsEnabled = action === "on";
-      setSubagentToolsActive(subagentToolsEnabled);
-      ctx.ui.notify(`Subagent tools ${action} for this session`, "info");
+      subagentToolsOverride = action === "reset" ? undefined : action === "on";
+      const enabled = subagentToolsOverride ?? loadSettings(ctx.cwd).subagentToolsEnabled ?? false;
+      setSubagentToolsActive(enabled);
+      ctx.ui.notify(`Subagent tools ${enabled ? "on" : "off"}${action === "reset" ? " from configuration" : " for this session"}`, "info");
     },
   });
 

@@ -10,6 +10,8 @@ import { isSubagentDepth } from "./recursion-policy.js";
 import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
+  /** Enable model-facing subagent tools at session start. Defaults to false. */
+  subagentToolsEnabled?: boolean;
   maxConcurrent?: number;
   /**
    * Max concurrent FOREGROUND (blocking) agents — `0` = unlimited, the default,
@@ -358,6 +360,7 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
   const out: SubagentsSettings = {};
+  if (typeof r.subagentToolsEnabled === "boolean") out.subagentToolsEnabled = r.subagentToolsEnabled;
   if (
     Number.isInteger(r.maxConcurrent) &&
     (r.maxConcurrent as number) >= 1 &&
