@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { fauxAssistantMessage, fauxToolCall, Type } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -271,7 +272,7 @@ describe("fused jobs through the real SDK runner/manager lifecycle", () => {
     const release = join(home, "external-release");
     const aborted = join(home, "external-aborted");
     const extension = join(home, "slow-external.mjs");
-    writeFileSync(extension, `import { Type } from '@earendil-works/pi-ai';
+    writeFileSync(extension, `import { Type } from 'typebox';
 import { existsSync, writeFileSync } from 'node:fs';
 export default function(pi) {
   pi.registerTool({ name: 'external_long', label: 'external', description: 'long external tool', parameters: Type.Object({}),

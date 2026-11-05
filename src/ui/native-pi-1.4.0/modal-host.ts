@@ -77,14 +77,14 @@ export function installModalHost140(tui: TUI): { show(component: Component, onCl
 	const prototype = fullscreen ? TuiAltScreen.prototype : TuiMainScreen.prototype;
 	const n = tui as Native;
 	const hooks = ["doRender", "resetRenderState", "handleTerminalInput", "setFocusInternal", "getFocusedComponent", "hasOverlay", "invalidate", "stop", "showOverlay", "consumeTerminalColorResponse", "consumeTerminalColorSchemeReport", "consumeCellSizeResponse", "isComponentMounted", "isOverlayVisible", "getTopmostVisibleOverlay", "clearOverlayFocusRestore", "hideTerminalCursor", "requestImmediateRender", "extractCursorPosition", "applyLineResets", ...(fullscreen ? ["refreshSearch", ...layers, "clearTextSelection", "stopScrollbarHover", "stopScrollbarDrag", "clearComponentMouseGesture"] : ["collectKittyImageIds", "deleteKittyImages", "positionHardwareCursor", "compositeOverlays"])] as const;
-	if (VERSION !== "1.4.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.4.0 TUI");
+	if (VERSION !== "1.5.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.5.0 TUI");
 	for (const key of hooks) {
 		const own = Object.getOwnPropertyDescriptor(tui, key);
-		if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.4.0 hook: ${key}`);
+		if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.5.0 hook: ${key}`);
 		const expected = Reflect.get(prototype, key);
-		if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.4.0 hook: ${key}`);
+		if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.5.0 hook: ${key}`);
 	}
-	if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.4.0 renderer state");
+	if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.5.0 renderer state");
 
 	const restores: Array<() => void> = [];
 	function patch<K extends keyof Native>(key: K, value: Native[K]): void {

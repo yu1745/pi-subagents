@@ -58,7 +58,7 @@ export function assertNativeHost(mode: unknown): asserts mode is NativeHost {
     typeof host.footerDataProvider?.constructor !== "function" ||
     typeof host.footerDataProvider?.onBranchChange !== "function" ||
     typeof host.footerDataProvider?.dispose !== "function") {
-    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.4.0 presentation API");
+    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.5.0 presentation API");
   }
 }
 

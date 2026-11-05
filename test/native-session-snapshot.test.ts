@@ -111,7 +111,7 @@ describe("Pi 1.4.0 session view runtime tracking", () => {
     expect(view.snapshot).toEqual(snapshot());
     expect(view.snapshot).toMatchObject({ revision: 3, pendingMessages: [user], streamingMessage: message });
     expect(view.snapshot.tools).toHaveLength(1);
-    const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.4.0");
+    const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.5.0");
     expect(Object.getOwnPropertyDescriptor(session, key)?.enumerable).toBe(false);
 
     raw._emit({ type: "message_end", message: user });
@@ -140,13 +140,13 @@ describe("Pi 1.4.0 session view runtime tracking", () => {
   });
 
   it("rejects incompatible shared state without replacing it or wrapping methods", () => {
-    for (const value of [{ schema: "unknown" }, { schema: "pi-subagents.session-view-tracking.pi-1.4.0/v1", revision: 0, disposed: false }]) {
+    for (const value of [{ schema: "unknown" }, { schema: "pi-subagents.session-view-tracking.pi-1.5.0/v1", revision: 0, disposed: false }]) {
       const { raw, session } = fake();
-      const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.4.0");
+      const key = Symbol.for("pi-subagents.session-view-tracking.pi-1.5.0");
       Object.defineProperty(session, key, { value });
       const emit = raw._emit;
       expect(installSessionViewTracking(session)).toBe(false);
-      expect(() => subscribeSessionView(session, () => {})).toThrow("supported Pi 1.4.0");
+      expect(() => subscribeSessionView(session, () => {})).toThrow("supported Pi 1.5.0");
       expect(raw._emit).toBe(emit);
       expect(Object.getOwnPropertyDescriptor(session, key)?.value).toBe(value);
     }

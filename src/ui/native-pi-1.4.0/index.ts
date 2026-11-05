@@ -4,8 +4,8 @@ import type { Component, TUI } from "@earendil-works/pi-tui";
 import { installModalHost140 } from "./modal-host.js";
 import { createReadOnlySessionView, type ReadOnlySessionViewOptions } from "./read-only-view.js";
 
-export const SUPPORTED_PI_VERSION = "1.4.0";
-const REGISTRY = Symbol.for("pi-subagents.native-session-view.pi-1.4.0");
+export const SUPPORTED_PI_VERSION = "1.5.0";
+const REGISTRY = Symbol.for("pi-subagents.native-session-view.pi-1.5.0");
 const HOOKS = ["createExtensionUIContext", "resetExtensionUI", "shutdown", "stop", "switchTuiMode"] as const;
 type HookName = (typeof HOOKS)[number];
 type NativeMethod = (this: NativeMode, ...args: unknown[]) => unknown;

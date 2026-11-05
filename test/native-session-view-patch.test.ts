@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => {
     stop() { calls.push("stop"); }
     switchTuiMode() { calls.push("switch"); return true; }
   }
-  return { version: "1.4.0", Mode, calls, create: vi.fn(), host: vi.fn() };
+  return { version: "1.5.0", Mode, calls, create: vi.fn(), host: vi.fn() };
 });
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
   ...await importOriginal<Record<string, unknown>>(),
@@ -50,7 +50,7 @@ function uiFor(mode: InstanceType<typeof mocks.Mode>) {
 }
 
 beforeEach(() => {
-  mocks.version = "1.4.0";
+  mocks.version = "1.5.0";
   mocks.calls.length = 0;
   mocks.create.mockReset();
   mocks.host.mockReset();
@@ -191,7 +191,7 @@ describe("Pi 1.4.0 native view bridge", () => {
     mocks.version = version;
     const handle = install();
     expect(handle.supported).toBe(false);
-    expect(handle.reason).toContain("1.4.0");
+    expect(handle.reason).toContain("1.5.0");
     expect(handle.reason).toContain(version);
     expect(prototype.createExtensionUIContext).toBe(originalContext);
     expect(getNativeSessionViewUnavailableReason()).toContain("tightly coupled");

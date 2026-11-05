@@ -9,8 +9,8 @@
 // file-fd spawn backend plus the per-job AbortController + stall watcher.
 
 import { appendFileSync } from "node:fs";
-import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { textBlock } from "../format.js";
 import {
     assertJobSlot, isBlankCommand, requireExistingCwd, startBackgroundJob,

@@ -1861,7 +1861,7 @@ export class AgentManager {
       session,
       signal: controller.signal,
       unavailableReason: this.untrackedSessions.has(session)
-        ? "Readonly child viewing is unavailable: the Pi 1.4.0 session tracker could not attach before execution. Reload or restart Pi and create a new child session."
+        ? `Readonly child viewing is unavailable: the Pi ${SUPPORTED_PI_VERSION} session tracker could not attach before execution. Reload or restart Pi and create a new child session.`
         : undefined,
       close: () => controller.abort(),
       release: () => {

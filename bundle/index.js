@@ -2965,14 +2965,14 @@ function installModalHost140(tui) {
   const prototype = fullscreen ? TuiAltScreen.prototype : TuiMainScreen.prototype;
   const n = tui;
   const hooks = ["doRender", "resetRenderState", "handleTerminalInput", "setFocusInternal", "getFocusedComponent", "hasOverlay", "invalidate", "stop", "showOverlay", "consumeTerminalColorResponse", "consumeTerminalColorSchemeReport", "consumeCellSizeResponse", "isComponentMounted", "isOverlayVisible", "getTopmostVisibleOverlay", "clearOverlayFocusRestore", "hideTerminalCursor", "requestImmediateRender", "extractCursorPosition", "applyLineResets", ...fullscreen ? ["refreshSearch", ...layers, "clearTextSelection", "stopScrollbarHover", "stopScrollbarDrag", "clearComponentMouseGesture"] : ["collectKittyImageIds", "deleteKittyImages", "positionHardwareCursor", "compositeOverlays"]];
-  if (VERSION !== "1.4.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.4.0 TUI");
+  if (VERSION !== "1.5.0" || Object.getPrototypeOf(tui) !== prototype || installed.has(tui) || !Object.isExtensible(tui)) throw new Error("Modal host requires an extensible, unclaimed bundled Pi 1.5.0 TUI");
   for (const key of hooks) {
     const own = Object.getOwnPropertyDescriptor(tui, key);
-    if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.4.0 hook: ${key}`);
+    if (own && !own.configurable) throw new Error(`Non-configurable Pi 1.5.0 hook: ${key}`);
     const expected = Reflect.get(prototype, key);
-    if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.4.0 hook: ${key}`);
+    if (typeof expected !== "function" || Reflect.get(tui, key) !== expected) throw new Error(`Unsupported Pi 1.5.0 hook: ${key}`);
   }
-  if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.4.0 renderer state");
+  if (!Array.isArray(n.overlayStack) || !(fullscreen ? Array.isArray(n.previousScreen) : Array.isArray(n.previousLines) && n.previousKittyImageIds instanceof Set)) throw new Error("Unsupported Pi 1.5.0 renderer state");
   const restores = [];
   function patch(key, value) {
     const descriptor = Object.getOwnPropertyDescriptor(n, key);
@@ -3567,7 +3567,7 @@ function assertNativeHost(mode) {
   ];
   const prototype = Object.getPrototypeOf(host);
   if (!prototype || methods.some((key) => typeof prototype[key] !== "function") || typeof host.ui?.requestRender !== "function" || typeof host.keybindings?.matches !== "function" || typeof host.mermaidMarkdownTransformer !== "function" || typeof host.footerDataProvider?.constructor !== "function" || typeof host.footerDataProvider?.onBranchChange !== "function" || typeof host.footerDataProvider?.dispose !== "function") {
-    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.4.0 presentation API");
+    throw new Error("Unsupported Pi host: native session view requires InteractiveMode 1.5.0 presentation API");
   }
 }
 var NativeTranscript;
@@ -3886,7 +3886,7 @@ function subscribeSessionView(session, listener) {
   let state = getState(session);
   if (!state) {
     if (!installSessionViewTracking(session)) {
-      throw new Error("Session view requires an idle, supported Pi 1.4.0 session tracked before running");
+      throw new Error("Session view requires an idle, supported Pi 1.5.0 session tracked before running");
     }
     state = getState(session);
   }
@@ -3910,8 +3910,8 @@ var stateKey, stateSchema, ViewState;
 var init_session_snapshot = __esm({
   "src/ui/native-pi-1.4.0/session-snapshot.ts"() {
     "use strict";
-    stateKey = /* @__PURE__ */ Symbol.for("pi-subagents.session-view-tracking.pi-1.4.0");
-    stateSchema = "pi-subagents.session-view-tracking.pi-1.4.0/v1";
+    stateKey = /* @__PURE__ */ Symbol.for("pi-subagents.session-view-tracking.pi-1.5.0");
+    stateSchema = "pi-subagents.session-view-tracking.pi-1.5.0/v1";
     __name(getState, "getState");
     __name(copyArguments, "copyArguments");
     __name(copyResult, "copyResult");
@@ -4314,8 +4314,8 @@ var init_native_pi_1_4 = __esm({
     "use strict";
     init_modal_host();
     init_read_only_view();
-    SUPPORTED_PI_VERSION = "1.4.0";
-    REGISTRY = /* @__PURE__ */ Symbol.for("pi-subagents.native-session-view.pi-1.4.0");
+    SUPPORTED_PI_VERSION = "1.5.0";
+    REGISTRY = /* @__PURE__ */ Symbol.for("pi-subagents.native-session-view.pi-1.5.0");
     HOOKS = ["createExtensionUIContext", "resetExtensionUI", "shutdown", "stop", "switchTuiMode"];
     __name(getNativeSessionViewUnavailableReason, "getNativeSessionViewUnavailableReason");
     __name(openView, "openView");
@@ -5578,7 +5578,7 @@ ${message}`;
         return {
           session,
           signal: controller.signal,
-          unavailableReason: this.untrackedSessions.has(session) ? "Readonly child viewing is unavailable: the Pi 1.4.0 session tracker could not attach before execution. Reload or restart Pi and create a new child session." : void 0,
+          unavailableReason: this.untrackedSessions.has(session) ? `Readonly child viewing is unavailable: the Pi ${SUPPORTED_PI_VERSION} session tracker could not attach before execution. Reload or restart Pi and create a new child session.` : void 0,
           close: /* @__PURE__ */ __name(() => controller.abort(), "close"),
           release: /* @__PURE__ */ __name(() => {
             if (!retention.viewers.delete(viewer)) return;
@@ -8366,7 +8366,7 @@ function clearBackgroundHint(ctx, render = true) {
 __name(clearBackgroundHint, "clearBackgroundHint");
 
 // src/jobs/patty/tools/bash-params.ts
-import { Type as Type4 } from "@earendil-works/pi-ai";
+import { Type as Type4 } from "typebox";
 var bashParamSchema = Type4.Object({
   command: Type4.String({ description: "Shell command to run" }),
   timeout: Type4.Optional(
@@ -8612,7 +8612,7 @@ __name(spawnBackground, "spawnBackground");
 
 // src/jobs/patty/tools/bash-bg.ts
 import { appendFileSync as appendFileSync2 } from "node:fs";
-import { Type as Type5 } from "@earendil-works/pi-ai";
+import { Type as Type5 } from "typebox";
 function registerBashBgTool(pi, reg) {
   pi.registerTool({
     name: "bash_bg",
@@ -8687,7 +8687,8 @@ function registerBashBgTool(pi, reg) {
 __name(registerBashBgTool, "registerBashBgTool");
 
 // src/jobs/patty/tools/jobs.ts
-import { StringEnum, Type as Type6 } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Type as Type6 } from "typebox";
 
 // src/jobs/patty/log-search.ts
 import { createReadStream } from "node:fs";
@@ -9028,7 +9029,7 @@ function statsAction(reg) {
 __name(statsAction, "statsAction");
 
 // src/jobs/patty/tools/monitor.ts
-import { Type as Type7 } from "@earendil-works/pi-ai";
+import { Type as Type7 } from "typebox";
 
 // src/jobs/patty/monitor-follow.ts
 import { closeSync as closeSync6, openSync as openSync6, readSync as readSync3, statSync as statSync6 } from "node:fs";

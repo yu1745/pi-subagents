@@ -36,8 +36,8 @@ type Internals = {
 type Registration = { listener: SessionViewEventListener };
 // Jiti can evaluate this module separately for each extension. The actual session
 // owns the state; neither module identity nor a prototype-global patch is involved.
-const stateKey = Symbol.for("pi-subagents.session-view-tracking.pi-1.4.0");
-const stateSchema = "pi-subagents.session-view-tracking.pi-1.4.0/v1";
+const stateKey = Symbol.for("pi-subagents.session-view-tracking.pi-1.5.0");
+const stateSchema = "pi-subagents.session-view-tracking.pi-1.5.0/v1";
 
 function getState(session: AgentSession): ViewState | undefined {
   const descriptor = Object.getOwnPropertyDescriptor(session, stateKey);
@@ -207,7 +207,7 @@ export function subscribeSessionView(session: AgentSession, listener: SessionVie
   let state = getState(session);
   if (!state) {
     if (!installSessionViewTracking(session)) {
-      throw new Error("Session view requires an idle, supported Pi 1.4.0 session tracked before running");
+      throw new Error("Session view requires an idle, supported Pi 1.5.0 session tracked before running");
     }
     state = getState(session)!;
   }

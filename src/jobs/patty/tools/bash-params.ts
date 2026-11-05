@@ -3,7 +3,7 @@
  * Shared bash parameter schema (TypeBox) used by the overridden `bash` tool.
  */
 
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 
 export const bashParamSchema = Type.Object({
     command: Type.String({ description: "Shell command to run" }),

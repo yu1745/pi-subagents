@@ -10,7 +10,7 @@ import { ForceSteerComposer, type ForceSteerOptions } from "./force-steer-compos
 import { getNativeSessionViewUnavailableReason } from "./native-pi-1.4.0/index.js";
 import type { ReadOnlySessionViewOptions } from "./native-pi-1.4.0/read-only-view.js";
 
-/** Local optional API installed by this plugin's exact Pi 1.4.0 runtime patch. */
+/** Local optional API installed by this plugin's exact Pi 1.5.0 runtime patch. */
 export interface SessionViewUI {
   notify(message: string, type?: "info" | "warning" | "error"): void;
   viewSession?(session: AgentSession, options?: ReadOnlySessionViewOptions & { signal?: AbortSignal }): Promise<void>;

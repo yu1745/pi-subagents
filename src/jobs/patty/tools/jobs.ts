@@ -12,8 +12,9 @@
  *   - stats: aggregate metrics
  */
 
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { formatDuration, formatJobLine, jobLabel, oneLine, textBlock } from "../format.js";
 import {
     ensureCompletionPromise,

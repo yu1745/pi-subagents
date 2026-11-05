@@ -7,7 +7,7 @@ import { openAgentSessionView, type SessionViewUI } from "../src/ui/session-view
 import { flushViews, nativeViewer } from "./helpers/session-view.js";
 
 vi.mock("../src/ui/native-pi-1.4.0/index.js", () => ({
-  SUPPORTED_PI_VERSION: "1.4.0",
+  SUPPORTED_PI_VERSION: "1.5.0",
   getNativeSessionViewUnavailableReason: () => "Readonly viewing requires the Pi 1.4.0 runtime patch; reload or restart Pi.",
 }));
 

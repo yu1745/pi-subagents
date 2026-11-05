@@ -7,8 +7,8 @@
 // completion): monitor is for per-event streams (tail -f | grep, poll loops,
 // file watches, ws feeds), not one-shot "wait until done".
 
-import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { textBlock } from "../format.js";
 import { assertJobSlot, isBlankCommand, requireExistingCwd } from "../lifecycle.js";
 import { startMonitorSession } from "../monitor-session.js";

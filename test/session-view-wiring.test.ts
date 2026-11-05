@@ -7,7 +7,7 @@ const patch = vi.hoisted(() => ({
   track: vi.fn(),
 }));
 vi.mock("../src/ui/native-pi-1.4.0/index.js", () => ({
-  SUPPORTED_PI_VERSION: "1.4.0",
+  SUPPORTED_PI_VERSION: "1.5.0",
   installNativeSessionViewPatch: patch.install,
   getNativeSessionViewUnavailableReason: () => "Readonly viewing requires the Pi 1.4.0 runtime patch; reload or restart Pi.",
 }));

@@ -122,7 +122,7 @@ describe("Pi 1.4 native tool rendering contracts", () => {
     const hooks = ["createExtensionUIContext", "resetExtensionUI", "shutdown", "stop", "switchTuiMode"];
     const prototype = InteractiveMode.prototype as unknown as Record<string, unknown>;
     const before = hooks.map(name => [name, Object.getOwnPropertyDescriptor(prototype, name)] as const);
-    expect(VERSION).toBe("1.4.0");
+    expect(VERSION).toBe("1.5.0");
     const patch = installNativeSessionViewPatch();
     try {
       expect(patch.supported).toBe(true);
