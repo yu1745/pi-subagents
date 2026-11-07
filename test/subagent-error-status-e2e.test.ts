@@ -18,6 +18,7 @@ import {
   routeBySession,
   runPrintMode,
 } from "./helpers/print-mode-runner.js";
+import { REAL_PI_CONFIG } from "./helpers/real-pi-timeout.js";
 
 /** Text of the parent's Agent tool result — what the orchestrator LLM sees. */
 function agentToolResult(session: AgentSession): string {
@@ -27,7 +28,7 @@ function agentToolResult(session: AgentSession): string {
   return ((msg?.content ?? []) as Array<{ text?: string }>).map((b) => b.text ?? "").join("");
 }
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 // Not matched by pi's transient-error patterns → no auto-retry, deterministic.
 const FATAL = "invalid request: provider rejected the prompt";

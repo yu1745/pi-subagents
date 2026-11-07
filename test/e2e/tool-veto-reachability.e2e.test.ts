@@ -44,9 +44,10 @@ import { runAgent } from "../../src/agent-runner.js";
 import { registerAgents } from "../../src/agent-types.js";
 import type { AgentConfig } from "../../src/types.js";
 import { registerFauxProvider } from "../helpers/pi-ai.js";
+import { REAL_PI_CONFIG } from "../helpers/real-pi-timeout.js";
 
 // Real pi-mono (loader + dynamic extension import + session construction).
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 /** Registers `alpha_read` / `alpha_write`; reused so no new fixture is needed. */
 const ALPHA = resolve(fileURLToPath(new URL("../fixtures/ext-alpha.mjs", import.meta.url)));

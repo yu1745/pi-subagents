@@ -38,10 +38,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PendingUsagePool } from "../../src/usage.js";
 import { fauxModelBackend } from "../helpers/faux-model-backend.js";
 import { registerFauxProvider } from "../helpers/pi-ai.js";
+import { REAL_PI_CONFIG } from "../helpers/real-pi-timeout.js";
 
 // Real pi session construction; a cold first run under full-suite CPU
 // contention can exceed vitest's 5s default.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 describe("subagent usage reaches the parent session's stats (real pi)", () => {
   let cwd: string;

@@ -7111,6 +7111,12 @@ function formatJobLine(job) {
   return `${head} [${kind}${owner}]: ${job.command.slice(0, PREVIEW_CHARS.line)} - ${statusLabel(job)}${duration}`;
 }
 __name(formatJobLine, "formatJobLine");
+function backgroundStartNotice(args) {
+  const verb = args.manual ? `Command was manually backgrounded by user with ID: ${args.id}.` : `Command running in background with ID: ${args.id}.`;
+  const name = args.name ? ` Name: ${args.name}.` : "";
+  return `${verb}${name} Wait for it with jobs action='attach' (bounded peek: jobs action='output') \u2014 do not poll the log with sleep + cat/tail. Output is being written to: ${args.logPath}`;
+}
+__name(backgroundStartNotice, "backgroundStartNotice");
 function textBlock(s) {
   return { type: "text", text: s };
 }
@@ -8394,7 +8400,7 @@ function registerBashTool(pi, reg, originalBash, shell = "bash") {
     promptGuidelines: [
       `Use ${shell} with run_in_background=true when a command is expected to run for a long time.`,
       "run_in_background is for ONE notification (the command exits when done). For per-event streaming (watching logs, polling an API, file changes), use the monitor tool instead.",
-      "For waits, prefer jobs action='attach' or a condition-based monitor when those express the real completion condition; explicit finite sleep commands remain allowed.",
+      "Wait on a job you started with jobs action='attach': it streams progress, returns the moment the job finishes, and is released as soon as the user types. Never wait with sleep + cat/tail on the log path \u2014 same wall clock, cannot return early, and it races the completion notice. jobs action='output' is the bounded peek when you only want the current tail.",
       "Check background job status with jobs action='list'.",
       "Read background output with jobs action='output'."
     ],
@@ -8556,7 +8562,7 @@ ${output}` : ""}`);
         return finishForeground(await spawned.exit);
       }
       promoteToBackground();
-      const text = race.reason === "manual" ? `Command was manually backgrounded by user with ID: ${id}. Output is being written to: ${logPath}` : `Command running in background with ID: ${id}. Output is being written to: ${logPath}`;
+      const text = race.reason === "manual" ? backgroundStartNotice({ id, logPath, manual: true }) : backgroundStartNotice({ id, logPath });
       return { content: [textBlock(text)], details: void 0 };
     }
     return finishForeground(race.exit);
@@ -8602,7 +8608,7 @@ function spawnBackground(args) {
   return {
     content: [
       textBlock(
-        `Command running in background with ID: ${id}. Output is being written to: ${logPath}`
+        backgroundStartNotice({ id, logPath, name: args.name })
       )
     ],
     details: void 0
@@ -8622,7 +8628,7 @@ function registerBashBgTool(pi, reg) {
     promptGuidelines: [
       "Use bash_bg when a command should definitely start in the background.",
       "bash_bg gives ONE completion notification. For a per-event stream (tail -f | grep, poll loop, file watch, WebSocket feed), use the monitor tool instead.",
-      "For waits, prefer jobs action='attach' or a condition-based monitor when those express the real completion condition; explicit finite sleep commands remain allowed.",
+      "Wait on a job you started with jobs action='attach': it streams progress, returns the moment the job finishes, and is released as soon as the user types. Never wait with sleep + cat/tail on the log path \u2014 same wall clock, cannot return early, and it races the completion notice. jobs action='output' is the bounded peek when you only want the current tail.",
       "Give the job a name when it will be easier to track in jobs list."
     ],
     parameters: Type5.Object({
@@ -8676,9 +8682,7 @@ function registerBashBgTool(pi, reg) {
         jobAc.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
       }
       return {
-        content: [textBlock(
-          `Command running in background with ID: ${id}.${p.name ? ` Name: ${p.name}.` : ""} Output is being written to: ${logPath}`
-        )],
+        content: [textBlock(backgroundStartNotice({ id, logPath, name: p.name }))],
         details: void 0
       };
     }
@@ -8769,9 +8773,9 @@ function registerJobsTool(pi, reg) {
     promptSnippet: "Inspect and manage background jobs",
     promptGuidelines: [
       "list: show all jobs",
-      "output: show the log tail for one job",
+      "attach: when you started a job and need its outcome, wait with action='attach' \u2014 it follows the live output, returns the moment the job finishes, and is released as soon as the user steers. Never wait on a job with sleep + cat/tail on its log path.",
+      "output: the bounded, non-blocking peek \u2014 use it for a running job's current tail or a failed job's error, not as a wait loop.",
       "kill: terminate a job",
-      "attach: follow a job's live output and wait for it to finish (use output for a non-blocking peek)",
       "search: regex-search all job output",
       "cleanup: purge terminal jobs",
       "stats: show aggregate metrics",
@@ -9543,7 +9547,7 @@ function registerMonitorTool(pi, reg) {
       "Don't use an unbounded command (tail -f, while true, inotifywait -m) for a single notification \u2014 it never exits and stays armed until timeout.",
       "Every pipe stage must flush per line: grep needs --line-buffered, awk needs fflush(); never pipe to `head` (it buffers until N matches).",
       "Silence is not success: your filter must match failure signatures too (e.g. grep -E --line-buffered 'done|Traceback|Error|FAILED|Killed|OOM'), or a crash looks identical to 'still running'.",
-      "Only stdout is the event stream; merge stderr with 2>&1 if its failures should notify. Poll remote APIs at 30s+, local checks at 0.5\u20131s, and guard transient failures with `|| true`.",
+      "Only stdout is the event stream; merge stderr with 2>&1 if its failures should notify. Poll remote APIs at 30s+, local checks at 0.5\u20131s, and guard transient failures with `|| true` \u2014 that cadence belongs inside the watch command, not in a bash call used to wait on a job (use jobs action='attach' for that).",
       "Give a specific description \u2014 it is shown on every notification.",
       "Use persistent:true for session-length watches (PR monitoring, log tails); stop it with the jobs tool (action='kill').",
       "Use the ws source for a WebSocket feed instead of `command: 'websocat \u2026'` \u2014 each text frame becomes one event."

@@ -25,8 +25,9 @@ import {
   type PrintModeRun,
   runPrintMode,
 } from "./helpers/print-mode-runner.js";
+import { REAL_PI_CONFIG } from "./helpers/real-pi-timeout.js";
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 const NESTED_TOOLS = ["Agent", "get_subagent_result", "steer_subagent"];
 

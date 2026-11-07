@@ -11,7 +11,7 @@
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { textBlock } from "../format.js";
+import { backgroundStartNotice, textBlock } from "../format.js";
 import {
     assertJobSlot, isBlankCommand, requireExistingCwd, startBackgroundJob,
 } from "../lifecycle.js";
@@ -33,7 +33,7 @@ export function registerBashBgTool(pi: ExtensionAPI, reg: BackgroundRegistry): v
         promptGuidelines: [
             "Use bash_bg when a command should definitely start in the background.",
             "bash_bg gives ONE completion notification. For a per-event stream (tail -f | grep, poll loop, file watch, WebSocket feed), use the monitor tool instead.",
-            "For waits, prefer jobs action='attach' or a condition-based monitor when those express the real completion condition; explicit finite sleep commands remain allowed.",
+            "Wait on a job you started with jobs action='attach': it streams progress, returns the moment the job finishes, and is released as soon as the user types. Never wait with sleep + cat/tail on the log path — same wall clock, cannot return early, and it races the completion notice. jobs action='output' is the bounded peek when you only want the current tail.",
             "Give the job a name when it will be easier to track in jobs list.",
         ],
         parameters: Type.Object({
@@ -81,10 +81,7 @@ export function registerBashBgTool(pi: ExtensionAPI, reg: BackgroundRegistry): v
             }
 
             return {
-                content: [textBlock(
-                    `Command running in background with ID: ${id}.` +
-                    `${p.name ? ` Name: ${p.name}.` : ""} Output is being written to: ${logPath}`
-                )],
+                content: [textBlock(backgroundStartNotice({ id, logPath, name: p.name }))],
                 details: undefined,
             };
         },

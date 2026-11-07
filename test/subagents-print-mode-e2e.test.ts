@@ -27,10 +27,11 @@ import {
   routeBySession,
   runPrintMode,
 } from "./helpers/print-mode-runner.js";
+import { REAL_PI_CONFIG } from "./helpers/real-pi-timeout.js";
 
 // Real pi-mono (loader + dynamic extension import + two live sessions) — a cold
 // run under full-suite CPU contention can exceed vitest's 5s default.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 const LIVE = /^(1|true|yes)$/i.test(process.env.PI_E2E_LIVE ?? "");
 

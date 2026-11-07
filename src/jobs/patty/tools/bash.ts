@@ -20,7 +20,7 @@ import {
     createBashToolDefinition,
     createPowerShellToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { textBlock } from "../format.js";
+import { backgroundStartNotice, textBlock } from "../format.js";
 import { clearBackgroundHint, showBackgroundHint } from "../hint.js";
 import {
     assertJobSlot,
@@ -78,7 +78,7 @@ export function registerBashTool(
         promptGuidelines: [
             `Use ${shell} with run_in_background=true when a command is expected to run for a long time.`,
             "run_in_background is for ONE notification (the command exits when done). For per-event streaming (watching logs, polling an API, file changes), use the monitor tool instead.",
-            "For waits, prefer jobs action='attach' or a condition-based monitor when those express the real completion condition; explicit finite sleep commands remain allowed.",
+            "Wait on a job you started with jobs action='attach': it streams progress, returns the moment the job finishes, and is released as soon as the user types. Never wait with sleep + cat/tail on the log path — same wall clock, cannot return early, and it races the completion notice. jobs action='output' is the bounded peek when you only want the current tail.",
             "Check background job status with jobs action='list'.",
             "Read background output with jobs action='output'.",
         ],
@@ -304,8 +304,8 @@ async function runForeground(args: {
             // manual background, one generic line for the timeout path.
             const text =
                 race.reason === "manual"
-                    ? `Command was manually backgrounded by user with ID: ${id}. Output is being written to: ${logPath}`
-                    : `Command running in background with ID: ${id}. Output is being written to: ${logPath}`;
+                    ? backgroundStartNotice({ id, logPath, manual: true })
+                    : backgroundStartNotice({ id, logPath });
             return { content: [textBlock(text)], details: undefined };
         }
 
@@ -366,7 +366,7 @@ function spawnBackground(args: {
     return {
         content: [
             textBlock(
-                `Command running in background with ID: ${id}. Output is being written to: ${logPath}`
+                backgroundStartNotice({ id, logPath, name: args.name })
             ),
         ],
         details: undefined,

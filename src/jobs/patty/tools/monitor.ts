@@ -54,7 +54,7 @@ export function registerMonitorTool(pi: ExtensionAPI, reg: BackgroundRegistry): 
             "Don't use an unbounded command (tail -f, while true, inotifywait -m) for a single notification — it never exits and stays armed until timeout.",
             "Every pipe stage must flush per line: grep needs --line-buffered, awk needs fflush(); never pipe to `head` (it buffers until N matches).",
             "Silence is not success: your filter must match failure signatures too (e.g. grep -E --line-buffered 'done|Traceback|Error|FAILED|Killed|OOM'), or a crash looks identical to 'still running'.",
-            "Only stdout is the event stream; merge stderr with 2>&1 if its failures should notify. Poll remote APIs at 30s+, local checks at 0.5–1s, and guard transient failures with `|| true`.",
+            "Only stdout is the event stream; merge stderr with 2>&1 if its failures should notify. Poll remote APIs at 30s+, local checks at 0.5–1s, and guard transient failures with `|| true` — that cadence belongs inside the watch command, not in a bash call used to wait on a job (use jobs action='attach' for that).",
             "Give a specific description — it is shown on every notification.",
             "Use persistent:true for session-length watches (PR monitoring, log tails); stop it with the jobs tool (action='kill').",
             "Use the ws source for a WebSocket feed instead of `command: 'websocat …'` — each text frame becomes one event.",

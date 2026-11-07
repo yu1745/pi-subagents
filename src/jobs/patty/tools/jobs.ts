@@ -53,9 +53,9 @@ export function registerJobsTool(
         promptSnippet: "Inspect and manage background jobs",
         promptGuidelines: [
             "list: show all jobs",
-            "output: show the log tail for one job",
+            "attach: when you started a job and need its outcome, wait with action='attach' — it follows the live output, returns the moment the job finishes, and is released as soon as the user steers. Never wait on a job with sleep + cat/tail on its log path.",
+            "output: the bounded, non-blocking peek — use it for a running job's current tail or a failed job's error, not as a wait loop.",
             "kill: terminate a job",
-            "attach: follow a job's live output and wait for it to finish (use output for a non-blocking peek)",
             "search: regex-search all job output",
             "cleanup: purge terminal jobs",
             "stats: show aggregate metrics",

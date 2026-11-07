@@ -34,10 +34,11 @@ import { getAgentConfig, registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { resolveAgentInvocationConfig } from "../src/invocation-config.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
+import { REAL_PI_CONFIG } from "./helpers/real-pi-timeout.js";
 
 // Real pi-mono (loader + dynamic extension import + session construction) — a
 // cold run under full-suite contention can exceed vitest's 5s default.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 const FIXTURES_DIR = resolve(fileURLToPath(new URL("./fixtures", import.meta.url)));
 const TEMPLATES_DIR = join(FIXTURES_DIR, ".pi", "agents");

@@ -5,9 +5,10 @@ import { type Context, fauxToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
 import { agentCall, type PrintModeRun, runPrintMode, toolResultsNamed } from "./helpers/print-mode-runner.js";
+import { REAL_PI_CONFIG } from "./helpers/real-pi-timeout.js";
 
 // Real loader/session startup can exceed the unit-test default under a full run.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 function textOf(context: Context): string {
   return context.messages.map(message => typeof message.content === "string" ? message.content

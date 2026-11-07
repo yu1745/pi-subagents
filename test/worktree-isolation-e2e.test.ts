@@ -25,8 +25,9 @@ import { fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 import { agentCall, type FauxReply, type PrintModeRun, runPrintMode } from "./helpers/print-mode-runner.js";
+import { REAL_PI_CONFIG } from "./helpers/real-pi-timeout.js";
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 /** The child creates this in whatever cwd it was actually given. */
 const MARKER_FILE = "agent-work.txt";

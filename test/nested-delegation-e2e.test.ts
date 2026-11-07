@@ -30,8 +30,9 @@ import {
   type PrintModeRun,
   runPrintMode,
 } from "./helpers/print-mode-runner.js";
+import { REAL_PI_CONFIG } from "./helpers/real-pi-timeout.js";
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 /** Marker the deepest agent emits — it must survive two hops back to the parent. */
 const WORKER_MARKER = "WORKER-REACHED-THE-TOP";

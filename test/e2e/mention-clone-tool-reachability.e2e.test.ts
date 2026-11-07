@@ -30,10 +30,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { REAL_PI_CONFIG } from "../helpers/real-pi-timeout.js";
 
 // Real pi-mono session construction; a cold first run under full-suite CPU
 // contention can exceed vitest's 5s default.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 // Hoisted so the (lifted) mock factory can reach it. Everything except the
 // capture is the real module — the point is to construct a REAL session.

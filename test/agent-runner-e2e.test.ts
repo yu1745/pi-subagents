@@ -32,12 +32,13 @@ import { extensionCanonicalName, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig } from "../src/types.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
+import { REAL_PI_CONFIG } from "./helpers/real-pi-timeout.js";
 
 // These tests spin up the REAL pi-mono runtime (loader + dynamic extension
 // import + session construction), so a cold first run under full-suite CPU
 // contention can exceed vitest's 5s default. Give the file generous headroom —
 // a genuine hang still fails, just later.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig(REAL_PI_CONFIG);
 
 const FIXTURE = resolve(fileURLToPath(new URL("./fixtures/e2e-probe-ext.mjs", import.meta.url)));
 /** The fixture registers exactly this tool. */

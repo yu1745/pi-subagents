@@ -72,6 +72,28 @@ export function truncateTail(content: string, maxChars: number): string {
     return `...[truncated, showing last ${maxChars} chars]\n${content.slice(-maxChars)}`;
 }
 
+/** Result text for a command that just moved to the background. It advertises
+ *  the wait/read interface (`jobs attach` / `jobs output`) and not the raw log
+ *  path alone: handed only a path, agents poll it with `sleep N; cat <path>`
+ *  instead of waiting on the job, which burns the same wall clock, cannot
+ *  return early, and races the completion notice. */
+export function backgroundStartNotice(args: {
+    id: string;
+    logPath: string;
+    name?: string;
+    manual?: boolean;
+}): string {
+    const verb = args.manual
+        ? `Command was manually backgrounded by user with ID: ${args.id}.`
+        : `Command running in background with ID: ${args.id}.`;
+    const name = args.name ? ` Name: ${args.name}.` : "";
+    return (
+        `${verb}${name} Wait for it with jobs action='attach' (bounded peek: jobs action='output') — ` +
+        `do not poll the log with sleep + cat/tail. ` +
+        `Output is being written to: ${args.logPath}`
+    );
+}
+
 /** Text content block builder — shared across all tools. The explicit return
  *  type documents the shared contract for the five tool call sites that
  *  import this — they rely on the literal shape, not inference. */
